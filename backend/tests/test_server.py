@@ -19,10 +19,13 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
         fake_orchestrator = mock.Mock()
 
         with mock.patch.object(server, "download_media") as fake_download_media, \
+             mock.patch.object(server, "download_record") as fake_record, \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")):
             fake_download_media.return_value = [
-                {"path": "C:/fake/20260924/downloads/影片一.mp4"},
-                {"path": "C:/fake/20260924/downloads/影片二.mp4"},
+                {"path": "C:/fake/20260924/downloads/影片一.mp4", "title": "影片一", "channel": "頻道A",
+                 "url": "https://youtube.com/watch?v=1", "upload_date": "2026-09-20", "video_id": "1"},
+                {"path": "C:/fake/20260924/downloads/影片二.mp4", "title": "影片二", "channel": "頻道B",
+                 "url": "https://youtube.com/watch?v=2", "upload_date": "2026-09-21", "video_id": "2"},
             ]
             download_fn = server.make_real_download_fn(fake_orchestrator)
             payload = {"url": "https://youtube.com/watch?v=x", "format_type": "video",
@@ -30,11 +33,15 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
             download_fn(payload, mock.Mock(), mock.Mock(), mock.Mock())
 
         fake_orchestrator.enqueue_transcription.assert_has_calls([
-            mock.call({"path": "C:/fake/20260924/downloads/影片一.mp4", "want_srt": False, "skip_existing": False}),
-            mock.call({"path": "C:/fake/20260924/downloads/影片二.mp4", "want_srt": False, "skip_existing": False}),
+            mock.call({"path": "C:/fake/20260924/downloads/影片一.mp4", "want_srt": False, "skip_existing": False,
+                       "metadata": fake_download_media.return_value[0]}),
+            mock.call({"path": "C:/fake/20260924/downloads/影片二.mp4", "want_srt": False, "skip_existing": False,
+                       "metadata": fake_download_media.return_value[1]}),
         ])
         # format_type 要真的傳給 download_media,不是永遠寫死 audio
         self.assertEqual(fake_download_media.call_args.kwargs["format_type"], "video")
+        # 下載完成要把 metadata 存進記錄,之後使用者手動挑同一份檔案轉錄才查得回出處
+        fake_record.save.assert_called_once_with(fake_download_media.return_value)
 
 
 class CancelledTranscriptionDiscardsPartialOutputTest(unittest.TestCase):
@@ -72,6 +79,56 @@ class CancelledTranscriptionDiscardsPartialOutputTest(unittest.TestCase):
 
         fake_transcriber.save_transcript.assert_called_once()
         fake_transcriber.save_srt.assert_called_once()
+
+
+class TranscriptionMetadataProvenanceTest(unittest.TestCase):
+    """使用者實測發現:轉錄出來的 .txt/.srt「來源」欄位永遠是「本機上傳」,
+    即使是本工具剛下載完自動接轉錄的檔案也一樣——因為 metadata 在下載完成
+    後就被丟掉了,從沒傳進 save_transcript/save_srt。這裡驗證兩條補回路徑:
+    (1) 自動接鏈時 payload 本來就帶 metadata,直接用;
+    (2) 使用者手動挑本機檔案轉錄、payload 沒有 metadata 時,退回查
+    download_record 記錄檔(下載過這份檔案的話查得到)。"""
+
+    def test_metadata_from_payload_is_passed_to_save_transcript_and_save_srt(self):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("完整結果", [{"start": 0, "end": 1, "text": "完整結果"}])
+        not_cancelled = mock.Mock()
+        not_cancelled.is_set.return_value = False
+        metadata = {"title": "影片一", "channel": "頻道A", "url": "https://youtube.com/watch?v=1",
+                    "upload_date": "2026-09-20"}
+
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
+             mock.patch.object(server, "download_record") as fake_record:
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": True, "skip_existing": False,
+                           "metadata": metadata},
+                          not_cancelled, mock.Mock(), mock.Mock())
+
+        fake_transcriber.save_transcript.assert_called_once_with("完整結果", mock.ANY, metadata=metadata)
+        fake_transcriber.save_srt.assert_called_once_with(mock.ANY, mock.ANY, metadata=metadata)
+        # payload 已經帶 metadata,不必再去查記錄檔
+        fake_record.lookup.assert_not_called()
+
+    def test_missing_metadata_falls_back_to_download_record_lookup(self):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("完整結果", [{"start": 0, "end": 1, "text": "完整結果"}])
+        not_cancelled = mock.Mock()
+        not_cancelled.is_set.return_value = False
+        recorded_metadata = {"title": "舊影片", "channel": "頻道C", "url": "https://youtube.com/watch?v=3",
+                              "upload_date": "2026-09-01"}
+
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
+             mock.patch.object(server, "download_record") as fake_record:
+            fake_record.lookup.return_value = recorded_metadata
+            transcribe_fn = server.make_real_transcribe_fn()
+            # payload 沒有 metadata 這個鍵,模擬使用者手動挑本機檔案
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": False},
+                          not_cancelled, mock.Mock(), mock.Mock())
+
+        fake_record.lookup.assert_called_once_with("C:/fake/video.mp4")
+        fake_transcriber.save_transcript.assert_called_once_with("完整結果", mock.ANY, metadata=recorded_metadata)
 
 
 class PauseResumeHttpRoutesTest(unittest.TestCase):

@@ -21,6 +21,7 @@ from orchestrator import Orchestrator, JobState  # noqa: E402
 from downloader import download_media  # noqa: E402
 from transcriber import Transcriber  # noqa: E402
 from index_builder import build_day_index  # noqa: E402
+import download_record  # noqa: E402
 
 
 def today_dir() -> Path:
@@ -35,7 +36,10 @@ def make_real_download_fn(orchestrator):
     """下載完成後自動接一個轉錄工作,轉錄選項(是否要字幕/跳過已存在)由呼叫端
     在 payload 裡指定,這裡原樣轉給轉錄工作,不自己決定預設值。
     build_day_index() 只掃 transcripts/*.txt,不看 downloads/,所以純下載的
-    項目要有轉錄工作接手,index 才有東西可以反映(票 03)。"""
+    項目要有轉錄工作接手,index 才有東西可以反映(票 03)。
+    metadata 隨 payload 一起轉給轉錄工作(自動接鏈當下就有,不用等查記錄檔),
+    同時也存一份到 download_record,這樣使用者之後手動挑同一份檔案轉錄
+    (例如下載中斷分好幾次、或只是想重新產生逐字稿)也查得回出處。"""
     def _download(payload, cancel_event, pause_event, report_progress):
         d = today_dir()
 
@@ -47,11 +51,13 @@ def make_real_download_fn(orchestrator):
             format_type=payload.get("format_type", "audio"),
             progress_callback=_progress, stop_event=cancel_event,
         )
+        download_record.save(downloaded)
         for entry in downloaded:
             orchestrator.enqueue_transcription({
                 "path": entry["path"],
                 "want_srt": payload.get("want_srt", True),
                 "skip_existing": payload.get("skip_existing", True),
+                "metadata": entry,
             })
     return _download
 
@@ -80,11 +86,15 @@ def make_real_transcribe_fn():
             # (同檔名、同位置),留著只會讓人誤以為轉錄完成了。
             report_progress(0.0, "已取消,不保留部分結果")
             return
+        # metadata 優先用 payload 帶的(下載完自動接鏈的情況);使用者手動挑
+        # 本機檔案轉錄時 payload 沒有 metadata,退回查 download_record——
+        # 查得到就補上出處,查不到才誠實顯示「本機上傳」(不是本工具下載過的檔案)。
+        metadata = payload.get("metadata") or download_record.lookup(path)
         # .txt 集中放 transcripts/;.srt 跟原始影音檔放同一個資料夾、同檔名,
         # 這樣播放器才能自動抓到字幕,不用手動搬(沿用 3-4.Yt-down-sub 的慣例)
-        transcriber.save_transcript(text, str(txt_path))
+        transcriber.save_transcript(text, str(txt_path), metadata=metadata)
         if payload.get("want_srt", True):
-            transcriber.save_srt(segments, str(Path(path).parent / f"{stem}.srt"))
+            transcriber.save_srt(segments, str(Path(path).parent / f"{stem}.srt"), metadata=metadata)
     return _transcribe
 
 
