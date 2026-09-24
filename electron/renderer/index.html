@@ -5,17 +5,37 @@
 <title>YT Down Sub</title>
 <style>
   body { font-family: "Microsoft JhengHei", sans-serif; margin: 20px; }
-  button { padding: 8px 16px; margin-right: 8px; }
+  button { padding: 8px 16px; margin-right: 8px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  fieldset { margin: 12px 0; padding: 10px 14px; }
+  legend { font-weight: bold; }
+  label { margin-right: 16px; }
   table { border-collapse: collapse; width: 100%; margin-top: 16px; }
-  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; }
+  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; vertical-align: top; }
   .state-done { color: #15803d; }
   .state-error { color: #b91c1c; }
   .state-pending-retry { color: #b45309; }
   .state-running { color: #1d4ed8; }
+  .progress-bar { background: #e5e7eb; border-radius: 4px; height: 8px; width: 120px; overflow: hidden; margin-top: 4px; }
+  .progress-fill { background: #1d4ed8; height: 100%; }
+  .pending-list { list-style: none; padding: 0; }
+  .pending-list li { padding: 4px 0; border-bottom: 1px solid #eee; }
 </style>
 </head>
 <body>
   <h1>YouTube / 本機影音 下載轉逐字稿</h1>
+
+  <fieldset>
+    <legend>選項(套用到接下來加入的項目)</legend>
+    <label>下載格式:
+      <select id="format-type">
+        <option value="audio">音訊(mp3)</option>
+        <option value="video">影片(mp4)</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="want-srt" checked> 產生字幕(.srt)</label>
+    <label><input type="checkbox" id="skip-existing" checked> 已有逐字稿就跳過</label>
+  </fieldset>
 
   <section>
     <h2>本機檔案</h2>
@@ -25,7 +45,14 @@
   <section>
     <h2>YouTube 網址</h2>
     <input id="yt-url" type="text" placeholder="https://www.youtube.com/watch?v=..." style="width:400px">
-    <button id="add-url">加入下載佇列</button>
+    <button id="add-url">加入待處理清單</button>
+  </section>
+
+  <section>
+    <h2>待處理清單（尚未送出，按「開始處理」才會真的開始）</h2>
+    <ul class="pending-list" id="pending-list"></ul>
+    <button id="start-btn" disabled>開始處理</button>
+    <button id="clear-pending-btn" disabled>清空待處理清單</button>
   </section>
 
   <section>
@@ -34,7 +61,7 @@
   </section>
 
   <table id="jobs-table">
-    <thead><tr><th>ID</th><th>類型</th><th>內容</th><th>狀態</th><th>錯誤訊息</th><th></th></tr></thead>
+    <thead><tr><th>ID</th><th>類型</th><th>內容</th><th>狀態 / 進度</th><th>錯誤訊息</th><th>操作</th></tr></thead>
     <tbody></tbody>
   </table>
 

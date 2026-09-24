@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
 const path = require("path");
 const { spawn } = require("child_process");
 
@@ -20,7 +20,7 @@ function startBackend() {
   return new Promise((resolve, reject) => {
     const pythonExe = resolvePythonExe();
     const serverScript = path.join(__dirname, "..", "backend", "server.py");
-    backendProcess = spawn(pythonExe, [serverScript], { cwd: path.join(__dirname, "..") });
+    backendProcess = spawn(pythonExe, [serverScript], { cwd: path.join(__dirname, ".."), windowsHide: true });
 
     let resolved = false;
     backendProcess.stdout.on("data", (data) => {
@@ -60,6 +60,7 @@ ipcMain.handle("pick-files", async () => {
 });
 
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(null); // 拿掉 Electron 內建的英文開發者選單(File/Edit/View/Window),跟這個工具無關
   try {
     const port = await startBackend();
     mainWindow = new BrowserWindow({

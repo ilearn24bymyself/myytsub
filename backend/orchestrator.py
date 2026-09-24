@@ -40,14 +40,23 @@ class Job:
         self.payload = payload
         self.state = JobState.PENDING
         self.error_message = None
+        self.progress = 0.0
+        self.message = None
         self.cancel_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # 預設「沒被暫停」;清掉這個旗標才是真的暫停
+        self.paused = False  # 給畫面看的:目前是不是處於「使用者按了暫停」狀態
 
 
 class Orchestrator:
     def __init__(self, download_fn, transcribe_fn, on_job_terminal=None):
         """
-        download_fn(payload, cancel_event) / transcribe_fn(payload, cancel_event):
+        download_fn(payload, cancel_event, pause_event, report_progress) /
+        transcribe_fn(payload, cancel_event, pause_event, report_progress):
             真正執行下載/轉錄的函式;完成回傳、失敗丟例外、限流丟 RateLimited。
+            pause_event:清掉代表暫停,fn 要自己去 wait() 才會真的停下來
+            (目前只有轉錄的實作會用;下載不支援暫停,可以忽略這個參數)。
+            report_progress(percent, message=None):執行過程中回報目前進度。
         on_job_terminal(job):
             每個工作進入終態(done/error/pending-retry/cancelled)時呼叫一次,
             用來觸發當日 index 增量重建。
@@ -76,13 +85,16 @@ class Orchestrator:
             self._jobs[job_id] = job
         return job
 
-    def enqueue_download(self, url):
-        job = self._new_job(JobType.DOWNLOAD, url)
+    def enqueue_download(self, payload):
+        """payload 是不透明的:orchestrator 不理解它的形狀,原樣轉交給 download_fn。
+        目前呼叫端(server.py)傳的是 {"url", "format_type", "want_srt", "skip_existing"}。"""
+        job = self._new_job(JobType.DOWNLOAD, payload)
         self._download_queue.put(job)
         return job.id
 
-    def enqueue_transcription(self, path):
-        job = self._new_job(JobType.TRANSCRIBE, path)
+    def enqueue_transcription(self, payload):
+        """同上;呼叫端目前傳的是 {"path", "want_srt", "skip_existing"}。"""
+        job = self._new_job(JobType.TRANSCRIBE, payload)
         self._transcribe_queue.put(job)
         return job.id
 
@@ -109,9 +121,22 @@ class Orchestrator:
         job = self.get_job(job_id)
         job.cancel_event.set()
 
+    def pause(self, job_id):
+        """通知一個正在執行的工作暫停。只有會去檢查 pause_event 的工作函式
+        (目前是轉錄)才會真的停下來;下載目前不支援暫停,呼叫了也不會有效果。"""
+        job = self.get_job(job_id)
+        job.pause_event.clear()
+        job.paused = True
+
+    def resume(self, job_id):
+        job = self.get_job(job_id)
+        job.pause_event.set()
+        job.paused = False
+
     def _finish(self, job, state, error_message=None):
         job.state = state
         job.error_message = error_message
+        job.paused = False  # 工作結束了,不該還顯示「暫停中」
         if self.on_job_terminal:
             self.on_job_terminal(job)
 
@@ -132,8 +157,14 @@ class Orchestrator:
                 continue
 
             job.state = JobState.RUNNING
+
+            def report_progress(percent, message=None, _job=job):
+                _job.progress = percent
+                if message is not None:
+                    _job.message = message
+
             try:
-                fn(job.payload, job.cancel_event)
+                fn(job.payload, job.cancel_event, job.pause_event, report_progress)
             except RateLimited:
                 if is_download_lane:
                     with self._lock:
