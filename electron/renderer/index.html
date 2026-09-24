@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>YT Down Sub</title>
+<style>
+  body { font-family: "Microsoft JhengHei", sans-serif; margin: 20px; }
+  button { padding: 8px 16px; margin-right: 8px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+  td, th { border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 14px; }
+  .state-done { color: #15803d; }
+  .state-error { color: #b91c1c; }
+  .state-pending-retry { color: #b45309; }
+  .state-running { color: #1d4ed8; }
+</style>
+</head>
+<body>
+  <h1>YouTube / 本機影音 下載轉逐字稿</h1>
+
+  <section>
+    <h2>本機檔案</h2>
+    <button id="pick-files">選擇本機影片檔（原生視窗）</button>
+  </section>
+
+  <section>
+    <h2>YouTube 網址</h2>
+    <input id="yt-url" type="text" placeholder="https://www.youtube.com/watch?v=..." style="width:400px">
+    <button id="add-url">加入下載佇列</button>
+  </section>
+
+  <section>
+    <button id="retry-btn">重試所有「待重試」項目</button>
+    <button id="refresh-btn">重新整理狀態</button>
+  </section>
+
+  <table id="jobs-table">
+    <thead><tr><th>ID</th><th>類型</th><th>內容</th><th>狀態</th><th>錯誤訊息</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
