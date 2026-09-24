@@ -74,6 +74,12 @@ def make_real_transcribe_fn():
         text, segments = transcriber.transcribe(
             path, progress_callback=_progress, pause_event=pause_event, stop_event=cancel_event,
         )
+        if cancel_event.is_set():
+            # transcribe() 被取消時不會丟例外,只會提早結束、回傳目前算到一半的
+            # 部分結果。這裡故意不存檔:半成品跟正常完成的檔案長得一模一樣
+            # (同檔名、同位置),留著只會讓人誤以為轉錄完成了。
+            report_progress(0.0, "已取消,不保留部分結果")
+            return
         # .txt 集中放 transcripts/;.srt 跟原始影音檔放同一個資料夾、同檔名,
         # 這樣播放器才能自動抓到字幕,不用手動搬(沿用 3-4.Yt-down-sub 的慣例)
         transcriber.save_transcript(text, str(txt_path))

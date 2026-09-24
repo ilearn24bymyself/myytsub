@@ -37,6 +37,43 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
         self.assertEqual(fake_download_media.call_args.kwargs["format_type"], "video")
 
 
+class CancelledTranscriptionDiscardsPartialOutputTest(unittest.TestCase):
+    """使用者實測抓到的 bug:轉錄中途取消,系統仍然把「取消當下已經算出來的
+    部分結果」存成 .txt/.srt,檔名、位置都跟正常完成的檔案一模一樣,完全看不出
+    是不完整的殘留。取消就該丟棄結果,不寫任何檔案。"""
+
+    def test_no_files_written_when_transcription_is_cancelled_midway(self):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("部分結果", [{"start": 0, "end": 1, "text": "部分結果"}])
+        already_cancelled = mock.Mock()
+        already_cancelled.is_set.return_value = True  # 模擬 transcribe() 因為被取消而提早結束
+
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")):
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": True, "skip_existing": False},
+                          already_cancelled, mock.Mock(), mock.Mock())
+
+        fake_transcriber.save_transcript.assert_not_called()
+        fake_transcriber.save_srt.assert_not_called()
+
+    def test_files_still_written_normally_when_not_cancelled(self):
+        # 對照組:確保上面那個修正沒有連正常完成的情況也一起擋掉
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("完整結果", [{"start": 0, "end": 1, "text": "完整結果"}])
+        not_cancelled = mock.Mock()
+        not_cancelled.is_set.return_value = False
+
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")):
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": True, "skip_existing": False},
+                          not_cancelled, mock.Mock(), mock.Mock())
+
+        fake_transcriber.save_transcript.assert_called_once()
+        fake_transcriber.save_srt.assert_called_once()
+
+
 class PauseResumeHttpRoutesTest(unittest.TestCase):
     """/api/jobs/<id>/pause、/resume 只有 orchestrator 層的邏輯測試,HTTP 路由本身沒測過
     (code review 抓到的小缺口)。這裡只測「路由有沒有把 id 正確解析出來、呼叫到
