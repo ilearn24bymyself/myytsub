@@ -20,7 +20,8 @@ function startBackend() {
   return new Promise((resolve, reject) => {
     const pythonExe = resolvePythonExe();
     const serverScript = path.join(__dirname, "..", "backend", "server.py");
-    backendProcess = spawn(pythonExe, [serverScript], { cwd: path.join(__dirname, ".."), windowsHide: true });
+    // windowsHide 故意不開:這個黑色主控台視窗使用者要留著當「系統還在跑」的提示
+    backendProcess = spawn(pythonExe, [serverScript], { cwd: path.join(__dirname, "..") });
 
     let resolved = false;
     backendProcess.stdout.on("data", (data) => {
@@ -59,8 +60,54 @@ ipcMain.handle("pick-files", async () => {
   return result.filePaths; // 使用者電腦上的真實磁碟路徑,不是上傳的位元組
 });
 
+// Electron 內建的預設選單是英文(File/Edit/View/Window)。這裡用同樣的項目
+// (role 保留 Electron 內建行為,label 換成中文)重建一份,選單功能不變,只是看得懂。
+function buildChineseMenu() {
+  const template = [
+    {
+      label: "檔案",
+      submenu: [{ role: "quit", label: "結束" }],
+    },
+    {
+      label: "編輯",
+      submenu: [
+        { role: "undo", label: "復原" },
+        { role: "redo", label: "取消復原" },
+        { type: "separator" },
+        { role: "cut", label: "剪下" },
+        { role: "copy", label: "複製" },
+        { role: "paste", label: "貼上" },
+        { role: "selectAll", label: "全選" },
+      ],
+    },
+    {
+      label: "檢視",
+      submenu: [
+        { role: "reload", label: "重新載入" },
+        { role: "forceReload", label: "強制重新載入" },
+        { role: "toggleDevTools", label: "切換開發者工具" },
+        { type: "separator" },
+        { role: "resetZoom", label: "實際大小" },
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "縮小" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "切換全螢幕" },
+      ],
+    },
+    {
+      label: "視窗",
+      submenu: [
+        { role: "minimize", label: "最小化" },
+        { role: "zoom", label: "縮放" },
+        { role: "close", label: "關閉視窗" },
+      ],
+    },
+  ];
+  return Menu.buildFromTemplate(template);
+}
+
 app.whenReady().then(async () => {
-  Menu.setApplicationMenu(null); // 拿掉 Electron 內建的英文開發者選單(File/Edit/View/Window),跟這個工具無關
+  Menu.setApplicationMenu(buildChineseMenu());
   try {
     const port = await startBackend();
     mainWindow = new BrowserWindow({
