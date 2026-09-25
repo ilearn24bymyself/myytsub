@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  系統圖表模板(A4 分頁 + Mermaid v12 + 芫荽字型,技術移植自 03.Private and life\3-8 texttouse)。
+  使用規則見專案根目錄的 UML-README.md,這裡只放機械式的使用說明:
+
+  1. 複製到 docs\diagrams\<主題>\index.html(<主題> 用英文 kebab-case,例如 daily-usage-flow)
+  2. 替換所有 {{...}}
+  3. _assets 路徑統一是 ../_assets/(跟本檔案同一層的 _assets,不管子資料夾深度都一樣,
+     因為每個主題都是 docs\diagrams\<主題>\index.html,只差一層)
+  4. 版面由 a4.js 自動排成 A4 分頁;圖表單獨一頁,自動選直向/橫向,字太小會改用 A3
+  5. <main id="src"> 底下的區塊順序就是頁面順序;圖表區塊(diagram-page)放最後
+  6. 一份檔案只放一張圖;要畫多張圖就開多個 <主題> 資料夾,不要塞進同一份裡
+-->
+<title>{{圖表標題}}</title>
+<link rel="stylesheet" href="../_assets/a4.css">
+</head>
+<body>
+<main id="src">
+
+<header>
+  <h1>{{圖表標題}}</h1>
+  <div class="meta">
+    <span>建立：{{YYYY-MM-DD}}</span>
+    <span>依據：{{根據哪些檔案 / 程式碼路徑畫出來的,方便之後核對是否過時}}</span>
+  </div>
+</header>
+
+<h2 id="about">這張圖在說什麼</h2>
+<div class="rule">
+  <p>{{一兩句話:這張圖給誰看、回答什麼問題}}</p>
+</div>
+
+<section class="diagram-page" id="diagram">
+<h2>{{圖表名稱}}</h2>
+<pre class="mermaid">
+flowchart TD
+    S@{ shape: sm-circ, label: "開始" } --> A["{{第一步}}"]
+    A --> B{"{{判斷}}"}
+    B -- 是 --> C["{{動作}}"]
+    B -- 否 --> D["{{動作}}"]
+    C --> Z@{ shape: fr-circ, label: "結束" }
+    D --> Z
+</pre>
+<p class="note">{{圖中顏色 / 符號的說明,沒有特別著色可刪}}</p>
+</section>
+
+</main>
+<script src="../_assets/mermaid.min.js"></script>
+<script src="../_assets/a4.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>使用流程：下載 / 轉錄逐字稿</title>
+<link rel="stylesheet" href="../_assets/a4.css">
+</head>
+<body>
+<main id="src">
+
+<header>
+  <h1>使用流程：下載 / 轉錄逐字稿</h1>
+  <div class="meta">
+    <span>建立：2026-09-26</span>
+    <span>依據：electron/renderer/index.html、electron/renderer/renderer.js、backend/orchestrator.py、backend/server.py（commit 11f1bdb）</span>
+  </div>
+</header>
+
+<h2 id="about">這張圖在說什麼</h2>
+<div class="rule">
+  <p>給要操作這個工具的人看的主線：從雙擊啟動、加入下載/轉錄項目、按開始處理，到兩條背景 lane 各自跑完、存檔、當天總覽頁 index.html 重建。執行中遇到限流/取消/暫停這些狀況怎麼處理，另外畫在同一資料夾的 <a href="../electron-app-job-controls/index.html">job-controls</a> 那張圖，這裡先看主線不分心。</p>
+</div>
+
+<section class="diagram-page" id="diagram">
+<h2>下載 / 轉錄使用流程（主線）</h2>
+<pre class="mermaid">
+flowchart TD
+    S@{ shape: sm-circ, label: "開始" } --> A["雙擊 bat 啟動(後端+視窗一起開)"]
+    A --> B{"下載網址,還是轉錄本機檔案?"}
+    B -- 網址 --> C["貼網址,加入待處理清單"]
+    B -- 本機檔案 --> D["原生視窗選檔(拿到真實磁碟路徑)"]
+    C --> E["選單選項(格式/字幕/跳過已存在)鎖進這一筆"]
+    D --> E
+    E --> F{"還要加項目?"}
+    F -- 是 --> B
+    F -- 否 --> G["按開始處理,送進後端佇列"]
+
+    G --> H1["下載 lane:依序背景執行"]
+    G --> H2["轉錄 lane:依序背景執行(跟下載互不卡住)"]
+
+    H1 --> L["下載完成,自動接一筆轉錄工作"]
+    L --> H2
+    H2 --> R["轉錄完成:存逐字稿+字幕,重建當天 index.html"]
+    R --> Z@{ shape: fr-circ, label: "結束:瀏覽器開 index.html 看總覽" }
+</pre>
+<p class="note">這條主線刻意不畫「被限流」「使用者取消」「使用者暫停」這幾種岔開正常路徑的狀況——那些屬於「執行中怎麼處理狀況」，畫在 job-controls 那張圖，兩張圖合起來才是完整流程，不是這張圖砍了內容。</p>
+</section>
+
+</main>
+<script src="../_assets/mermaid.min.js"></script>
+<script src="../_assets/a4.js"></script>
+</body>
+</html>

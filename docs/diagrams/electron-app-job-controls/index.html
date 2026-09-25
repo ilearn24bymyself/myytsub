@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>執行中狀況處理：限流 / 取消 / 暫停</title>
+<link rel="stylesheet" href="../_assets/a4.css">
+</head>
+<body>
+<main id="src">
+
+<header>
+  <h1>執行中狀況處理：限流 / 取消 / 暫停</h1>
+  <div class="meta">
+    <span>建立：2026-09-26</span>
+    <span>依據：backend/orchestrator.py、backend/server.py、electron/renderer/renderer.js（commit 11f1bdb）</span>
+  </div>
+</header>
+
+<h2 id="about">這張圖在說什麼</h2>
+<div class="rule">
+  <p>接續 <a href="../electron-app-usage-flow/index.html">使用流程（主線）</a>：下載 lane 跟轉錄 lane 各自在跑的時候，使用者可以做什麼、遇到限流會發生什麼。這是「主線」圖裡被拿掉、另外獨立成一張的岔路。</p>
+</div>
+
+<section class="diagram-page" id="diagram">
+<h2>下載限流重試 / 轉錄取消暫停</h2>
+<pre class="mermaid">
+flowchart TD
+    S@{ shape: sm-circ, label: "開始:下載 lane 或轉錄 lane 執行中" } --> B{"哪條 lane?"}
+
+    B -- 下載 lane --> D1{"被 YouTube 限流(429 / bot 偵測)?"}
+    D1 -- 是 --> D2["這支標記「待重試」,同批次剩餘下載直接跳過、不逐支嘗試"]:::danger
+    D2 --> D3["使用者按「重試所有待重試項目」"]
+    D3 --> D4["清除限流旗標,待重試項目重新排隊,恢復正常下載"]
+    D1 -- 否 --> D5["正常下載完成"]
+
+    B -- 轉錄 lane --> T1{"使用者勾選項目+按「取消勾選項目」?"}
+    T1 -- 是 --> T2["標記取消:轉錄不論算到哪都捨棄結果、不寫檔"]:::danger
+    T1 -- 否 --> T3{"使用者按「暫停」?"}
+    T3 -- 是 --> T4["轉錄卡在目前進度等待"]
+    T4 --> T5{"使用者按「繼續」?"}
+    T5 -- 是 --> T3
+    T3 -- 否 --> T6["正常轉錄完成"]
+
+    D5 --> Z@{ shape: fr-circ, label: "結束" }
+    D4 --> Z
+    T2 --> Z
+    T6 --> Z
+</pre>
+<p class="note">紅色兩個節點是「東西沒有正常完成」的情況：被限流的下載卡在待重試、需要使用者主動按重試；取消的轉錄刻意不留半成品檔案(檔名/位置跟正常完成的檔案一模一樣,留著會被誤以為轉錄完成了)。暫停跟繼續只對轉錄有效,下載不支援暫停。</p>
+</section>
+
+</main>
+<script src="../_assets/mermaid.min.js"></script>
+<script src="../_assets/a4.js"></script>
+</body>
+</html>
