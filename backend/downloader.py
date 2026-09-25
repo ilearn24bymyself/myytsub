@@ -6,6 +6,10 @@ from yt_dlp.utils import DownloadCancelled
 
 from orchestrator import RateLimited
 
+# 跟 download_media() 用同一份,也給 source_lookup.py 拿來核對反查到的
+# video_id 是不是真的下載過(不是模組內部變數,別處要查就得重複算路徑)。
+ARCHIVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'download_archive.txt')
+
 # YouTube 限流/IP 鎖定的已知訊號:HTTP 429、bot-check 提示訊息。
 # 跟一般性錯誤(檔案損毀、網路中斷、影片下架)區分開來 —— 這類訊號代表整個
 # 來源 IP 被鎖,不是這一支影片本身的問題,不該對它逐支重試。
@@ -93,7 +97,7 @@ def download_media(url: str, output_dir: str, format_type: str = "audio",
         os.makedirs(output_dir, exist_ok=True)
 
     ffmpeg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin')
-    archive_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'download_archive.txt')
+    archive_file = ARCHIVE_FILE
 
     def _progress_hook(d):
         if stop_event is not None and stop_event.is_set():

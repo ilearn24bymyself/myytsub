@@ -22,6 +22,7 @@ from downloader import download_media  # noqa: E402
 from transcriber import Transcriber  # noqa: E402
 from index_builder import build_day_index  # noqa: E402
 import download_record  # noqa: E402
+import source_lookup  # noqa: E402
 
 
 def today_dir() -> Path:
@@ -87,9 +88,11 @@ def make_real_transcribe_fn():
             report_progress(0.0, "已取消,不保留部分結果")
             return
         # metadata 優先用 payload 帶的(下載完自動接鏈的情況);使用者手動挑
-        # 本機檔案轉錄時 payload 沒有 metadata,退回查 download_record——
-        # 查得到就補上出處,查不到才誠實顯示「本機上傳」(不是本工具下載過的檔案)。
-        metadata = payload.get("metadata") or download_record.lookup(path)
+        # 本機檔案轉錄時 payload 沒有 metadata,退回查 download_record;都查
+        # 不到(例如下載當時被限流,yt-dlp 自己也沒拿到 metadata)才用檔名
+        # 反查 YouTube,反查到、且確認在 download_archive.txt 裡才採信,
+        # 查不到才誠實顯示「本機上傳」(不是本工具下載過的檔案)。
+        metadata = payload.get("metadata") or download_record.lookup(path) or source_lookup.guess_metadata(path)
         # .txt 集中放 transcripts/;.srt 跟原始影音檔放同一個資料夾、同檔名,
         # 這樣播放器才能自動抓到字幕,不用手動搬(沿用 3-4.Yt-down-sub 的慣例)
         transcriber.save_transcript(text, str(txt_path), metadata=metadata)

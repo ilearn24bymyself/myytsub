@@ -130,6 +130,27 @@ class TranscriptionMetadataProvenanceTest(unittest.TestCase):
         fake_record.lookup.assert_called_once_with("C:/fake/video.mp4")
         fake_transcriber.save_transcript.assert_called_once_with("完整結果", mock.ANY, metadata=recorded_metadata)
 
+    def test_falls_back_to_source_lookup_when_record_also_has_nothing(self):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("完整結果", [{"start": 0, "end": 1, "text": "完整結果"}])
+        not_cancelled = mock.Mock()
+        not_cancelled.is_set.return_value = False
+        guessed_metadata = {"title": "反查到的影片", "channel": "某頻道",
+                             "url": "https://youtube.com/watch?v=guessed", "upload_date": None}
+
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "source_lookup") as fake_lookup:
+            fake_record.lookup.return_value = None
+            fake_lookup.guess_metadata.return_value = guessed_metadata
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": False},
+                          not_cancelled, mock.Mock(), mock.Mock())
+
+        fake_lookup.guess_metadata.assert_called_once_with("C:/fake/video.mp4")
+        fake_transcriber.save_transcript.assert_called_once_with("完整結果", mock.ANY, metadata=guessed_metadata)
+
 
 class PauseResumeHttpRoutesTest(unittest.TestCase):
     """/api/jobs/<id>/pause、/resume 只有 orchestrator 層的邏輯測試,HTTP 路由本身沒測過

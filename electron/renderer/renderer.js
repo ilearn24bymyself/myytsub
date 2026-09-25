@@ -52,7 +52,17 @@ function stateLabel(state) {
   return labels[state] || state;
 }
 
+// 勾選狀態跟著 job id 記,重新整理(輪詢)後同一筆項目的勾選不會被清掉,
+// 只有項目本身消失(不在最新的 jobs 清單裡)才會跟著清掉。
+const selectedJobIds = new Set();
+const CANCELLABLE_STATES = new Set(["pending", "running"]);
+
 function renderJobs(jobs) {
+  const liveIds = new Set(jobs.map((j) => j.id));
+  for (const id of [...selectedJobIds]) {
+    if (!liveIds.has(id)) selectedJobIds.delete(id);
+  }
+
   const tbody = document.querySelector("#jobs-table tbody");
   tbody.innerHTML = "";
   for (const job of jobs) {
@@ -70,7 +80,11 @@ function renderJobs(jobs) {
         actions.push(`<button data-pause="${job.id}" data-paused="${job.paused ? "1" : "0"}">${job.paused ? "繼續" : "暫停"}</button>`);
       }
     }
+    const checkboxCell = CANCELLABLE_STATES.has(job.state)
+      ? `<input type="checkbox" data-select="${job.id}" ${selectedJobIds.has(job.id) ? "checked" : ""}>`
+      : "";
     tr.innerHTML = `
+      <td>${checkboxCell}</td>
       <td>${job.id}</td>
       <td>${job.type === "download" ? "下載" : "轉錄"}</td>
       <td>${job.content ?? ""}</td>
@@ -86,6 +100,23 @@ function renderJobs(jobs) {
   tbody.querySelectorAll("[data-pause]").forEach((btn) => {
     btn.addEventListener("click", () => pauseJob(btn.dataset.pause));
   });
+  tbody.querySelectorAll("[data-select]").forEach((box) => {
+    box.addEventListener("change", () => {
+      if (box.checked) selectedJobIds.add(box.dataset.select);
+      else selectedJobIds.delete(box.dataset.select);
+      document.getElementById("cancel-selected-btn").disabled = selectedJobIds.size === 0;
+    });
+  });
+  document.getElementById("cancel-selected-btn").disabled = selectedJobIds.size === 0;
+}
+
+async function cancelSelected() {
+  const ids = [...selectedJobIds];
+  for (const id of ids) {
+    await fetch(`/api/jobs/${id}/cancel`, { method: "POST" });
+  }
+  selectedJobIds.clear();
+  fetchJobs();
 }
 
 async function startProcessing() {
@@ -156,6 +187,7 @@ document.getElementById("clear-pending-btn").addEventListener("click", () => {
 });
 document.getElementById("retry-btn").addEventListener("click", retryPending);
 document.getElementById("refresh-btn").addEventListener("click", fetchJobs);
+document.getElementById("cancel-selected-btn").addEventListener("click", cancelSelected);
 
 renderPending();
 fetchJobs();
