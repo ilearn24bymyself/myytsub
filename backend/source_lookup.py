@@ -59,5 +59,7 @@ def guess_metadata(path: str) -> dict | None:
         "title": candidate["title"], "channel": candidate["channel"],
         "url": candidate["url"], "upload_date": None,
     }
-    download_record.save([{"path": path, "video_id": candidate["video_id"], **metadata}])
+    # download_record.save() 只存 title/channel/url/upload_date,不留 video_id
+    # (lookup() 從來不需要它),這裡就不傳,避免看起來像有存實際上被丟掉。
+    download_record.save([{"path": path, **metadata}])
     return metadata

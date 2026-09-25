@@ -35,9 +35,10 @@ class GuessMetadataTest(unittest.TestCase):
             result = source_lookup.guess_metadata("C:/fake/video.mp4")
 
         self.assertEqual(result["url"], "https://youtube.com/watch?v=abc123")
+        # video_id 不傳給 save():download_record 的存檔格式本來就不留這個欄位
         fake_record.save.assert_called_once_with([{
             "path": "C:/fake/video.mp4", "title": "某影片", "channel": "某頻道",
-            "url": "https://youtube.com/watch?v=abc123", "upload_date": None, "video_id": "abc123",
+            "url": "https://youtube.com/watch?v=abc123", "upload_date": None,
         }])
 
     def test_search_failure_returns_none_instead_of_raising(self):
