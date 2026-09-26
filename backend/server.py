@@ -52,6 +52,12 @@ def make_real_download_fn(orchestrator):
             format_type=payload.get("format_type", "audio"),
             progress_callback=_progress, stop_event=cancel_event,
         )
+        if not downloaded:
+            # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
+            # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
+            # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因。
+            report_progress(100.0, "已下載過,略過(yt-dlp 記錄過這支影片)")
+            return
         download_record.save(downloaded)
         for entry in downloaded:
             orchestrator.enqueue_transcription({

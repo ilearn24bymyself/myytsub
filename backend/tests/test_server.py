@@ -43,6 +43,28 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
         # 下載完成要把 metadata 存進記錄,之後使用者手動挑同一份檔案轉錄才查得回出處
         fake_record.save.assert_called_once_with(fake_download_media.return_value)
 
+    def test_already_archived_video_reports_a_clear_message_instead_of_silent_done(self):
+        """使用者實測踩到的 bug:網址對應的影片已經在 yt-dlp 的 download_archive
+        裡記錄過,download_media() 會回傳空陣列(不下載、不報錯)。這裡不能讓
+        它看起來跟正常完成一模一樣——沒有任何檔案、也沒有接轉錄工作,卻顯示
+        「完成」,使用者完全不知道發生了什麼事。"""
+        fake_orchestrator = mock.Mock()
+        fake_report_progress = mock.Mock()
+
+        with mock.patch.object(server, "download_media", return_value=[]), \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260926")):
+            download_fn = server.make_real_download_fn(fake_orchestrator)
+            payload = {"url": "https://youtube.com/watch?v=x", "format_type": "video",
+                       "want_srt": True, "skip_existing": True}
+            download_fn(payload, mock.Mock(), mock.Mock(), fake_report_progress)
+
+        fake_orchestrator.enqueue_transcription.assert_not_called()
+        fake_record.save.assert_not_called()
+        fake_report_progress.assert_called_once_with(100.0, mock.ANY)
+        message = fake_report_progress.call_args.args[1]
+        self.assertIn("已下載過", message)
+
 
 class CancelledTranscriptionDiscardsPartialOutputTest(unittest.TestCase):
     """使用者實測抓到的 bug:轉錄中途取消,系統仍然把「取消當下已經算出來的
