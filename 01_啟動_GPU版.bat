@@ -29,7 +29,7 @@ if not exist "venv\python.exe" (
 echo [System] Starting Electron app...
 echo.
 set PYTHON_EXE=%~dp0venv\python.exe
-"%~dp0node_portable\node.exe" "%~dp0node_modules\electron\cli.js" "%~dp0" 2>> startup.log
+"%~dp0node_portable\node.exe" "%~dp0node_modules\electron\cli.js" "%~dp0." 2>> startup.log
 echo.
 echo [System] App closed.
 pause
