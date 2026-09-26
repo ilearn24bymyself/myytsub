@@ -18,7 +18,8 @@ STATIC_DIR = BASE_DIR / "electron" / "renderer"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator import Orchestrator, JobState  # noqa: E402
-from downloader import download_media  # noqa: E402
+from downloader import download_media, extract_video_id, fetch_title_only  # noqa: E402
+from yt_dlp.utils import sanitize_filename  # noqa: E402
 from transcriber import Transcriber  # noqa: E402
 from index_builder import build_day_index  # noqa: E402
 import download_record  # noqa: E402
@@ -31,6 +32,23 @@ def today_dir() -> Path:
     (d / "uploads").mkdir(parents=True, exist_ok=True)
     (d / "transcripts").mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _find_previously_downloaded_path(url: str) -> str | None:
+    """影片被 yt-dlp 的 download_archive 記錄過、這次沒有真的下載時,盡量找回
+    之前存在哪裡:先查 download_record(有記錄的話最快、不用打網路);查不到
+    再用 video 標題(另外打一次輕量 yt-dlp 查詢,不受 archive 影響)去比對磁碟上
+    實際的檔名——這條路徑涵蓋 download_record 上線前就下載過的舊資料。"""
+    video_id = extract_video_id(url)
+    if video_id:
+        found = download_record.find_path_by_video_id(video_id)
+        if found:
+            return found
+
+    title = fetch_title_only(url)
+    if not title:
+        return None
+    return download_record.find_path_by_title(str(BASE_DIR), sanitize_filename(title))
 
 
 def make_real_download_fn(orchestrator):
@@ -55,8 +73,13 @@ def make_real_download_fn(orchestrator):
         if not downloaded:
             # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
             # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
-            # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因。
-            report_progress(100.0, "已下載過,略過(yt-dlp 記錄過這支影片)")
+            # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因,並且
+            # 盡量把之前下載到哪裡也一併告訴使用者。
+            found_path = _find_previously_downloaded_path(payload["url"])
+            if found_path:
+                report_progress(100.0, f"已下載過,略過 → {found_path}")
+            else:
+                report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)")
             return
         download_record.save(downloaded)
         for entry in downloaded:

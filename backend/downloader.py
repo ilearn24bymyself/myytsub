@@ -244,6 +244,32 @@ def download_media(url: str, output_dir: str, format_type: str = "audio",
     return downloaded_files
 
 
+_VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/)([A-Za-z0-9_-]{11})")
+
+
+def extract_video_id(url: str) -> str | None:
+    """從常見的 YouTube 網址格式(watch?v=、youtu.be/、shorts/)解析出 video ID。
+    解析不出來就回傳 None,呼叫端要能處理拿不到 ID 的情況。"""
+    m = _VIDEO_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+def fetch_title_only(url: str) -> str | None:
+    """只要標題,不下載、不受 download_archive 影響(archive 只在下載階段生效)。
+    用途:影片已經被 archive 記錄過,download_media() 拿不到任何 info 時
+    (yt-dlp 這時候 extract_info(download=True) 回傳 None),用這個另外查
+    標題,才能拿標題去比對磁碟上實際的檔名找回路徑。"""
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return None
+    if not info:
+        return None
+    return info.get("title")
+
+
 if __name__ == "__main__":
     test_url = "https://www.youtube.com/watch?v=BaW_C-CGtQc"
     print("Testing download...")

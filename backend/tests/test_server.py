@@ -43,6 +43,41 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
         # 下載完成要把 metadata 存進記錄,之後使用者手動挑同一份檔案轉錄才查得回出處
         fake_record.save.assert_called_once_with(fake_download_media.return_value)
 
+    def test_already_archived_video_reports_the_previous_path_when_found_via_record(self):
+        fake_orchestrator = mock.Mock()
+        fake_report_progress = mock.Mock()
+
+        with mock.patch.object(server, "download_media", return_value=[]), \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260926")):
+            fake_record.find_path_by_video_id.return_value = "C:/fake/20260920/downloads/舊影片.mp4"
+            download_fn = server.make_real_download_fn(fake_orchestrator)
+            payload = {"url": "https://www.youtube.com/watch?v=pfGg0Uris1w", "format_type": "video",
+                       "want_srt": True, "skip_existing": True}
+            download_fn(payload, mock.Mock(), mock.Mock(), fake_report_progress)
+
+        fake_record.find_path_by_video_id.assert_called_once_with("pfGg0Uris1w")
+        message = fake_report_progress.call_args.args[1]
+        self.assertIn("C:/fake/20260920/downloads/舊影片.mp4", message)
+
+    def test_already_archived_video_falls_back_to_title_search_when_record_has_nothing(self):
+        fake_orchestrator = mock.Mock()
+        fake_report_progress = mock.Mock()
+
+        with mock.patch.object(server, "download_media", return_value=[]), \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "fetch_title_only", return_value="舊影片標題"), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260926")):
+            fake_record.find_path_by_video_id.return_value = None
+            fake_record.find_path_by_title.return_value = "C:/fake/20260918/downloads/舊影片標題.mp4"
+            download_fn = server.make_real_download_fn(fake_orchestrator)
+            payload = {"url": "https://www.youtube.com/watch?v=pfGg0Uris1w", "format_type": "video",
+                       "want_srt": True, "skip_existing": True}
+            download_fn(payload, mock.Mock(), mock.Mock(), fake_report_progress)
+
+        message = fake_report_progress.call_args.args[1]
+        self.assertIn("C:/fake/20260918/downloads/舊影片標題.mp4", message)
+
     def test_already_archived_video_reports_a_clear_message_instead_of_silent_done(self):
         """使用者實測踩到的 bug:網址對應的影片已經在 yt-dlp 的 download_archive
         裡記錄過,download_media() 會回傳空陣列(不下載、不報錯)。這裡不能讓
@@ -53,6 +88,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
 
         with mock.patch.object(server, "download_media", return_value=[]), \
              mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "fetch_title_only", return_value=None), \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260926")):
             download_fn = server.make_real_download_fn(fake_orchestrator)
             payload = {"url": "https://youtube.com/watch?v=x", "format_type": "video",
