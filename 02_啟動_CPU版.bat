@@ -32,7 +32,7 @@ if "%SETUP_FAILED%"=="1" (
 echo [System] Starting Electron app...
 echo.
 set PYTHON_EXE=%~dp0venv\python.exe
-"%~dp0node_portable\node.exe" "%~dp0node_modules\electron\cli.js" "%~dp0." 2>> startup.log
+"%~dp0node_portable\node.exe" "%~dp0node_modules\electron\cli.js" "%~dp0." 2>> "%~dp0startup.log"
 echo.
 echo [System] App closed.
 pause

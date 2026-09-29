@@ -4,16 +4,20 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import namedtuple
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHERS = sorted(glob.glob(str(ROOT / "0[12]_*.bat")))
 START_MARKER = "Starting Electron app"
 
+LauncherRun = namedtuple("LauncherRun", "out log_next_to_bat log_in_cwd")
+
 
 def _run_launcher(bat_src, bootstrap_exit_code, with_venv, cwd_has_venv=False, cwd_is_bat_dir=True):
     """在暫存資料夾複製一份 .bat,配上假的 bootstrap.ps1(可指定結束代碼),
-    不碰真正的專案檔案。回傳 .bat 的完整輸出文字。
+    不碰真正的專案檔案。回傳 LauncherRun(.bat 的完整輸出, startup.log 有沒有落在 .bat 旁邊,
+    startup.log 有沒有落在執行當下的資料夾)。
     cwd_is_bat_dir=True 模擬使用者直接雙擊(執行資料夾就是 .bat 所在資料夾);
     False 模擬用捷徑或「以系統管理員身分執行」(執行資料夾是別的地方)。"""
     work = Path(tempfile.mkdtemp(prefix="launcher_a_"))
@@ -32,7 +36,8 @@ def _run_launcher(bat_src, bootstrap_exit_code, with_venv, cwd_has_venv=False, c
             ["cmd.exe", "/c", str(work / "launcher.bat")],
             cwd=str(work if cwd_is_bat_dir else other), stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
         )
-        return (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        out = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+        return LauncherRun(out, (work / "startup.log").exists(), (other / "startup.log").exists())
     finally:
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(other, ignore_errors=True)
@@ -50,20 +55,20 @@ class LauncherBatTest(unittest.TestCase):
     def test_does_not_start_app_when_bootstrap_fails_even_if_python_step_succeeded(self):
         for bat in LAUNCHERS:
             with self.subTest(bat=Path(bat).name):
-                out = _run_launcher(bat, bootstrap_exit_code=1, with_venv=True)
+                out = _run_launcher(bat, bootstrap_exit_code=1, with_venv=True).out
                 self.assertNotIn(START_MARKER, out)
 
     def test_does_not_start_app_when_bootstrap_fails_and_nothing_installed(self):
         for bat in LAUNCHERS:
             with self.subTest(bat=Path(bat).name):
-                out = _run_launcher(bat, bootstrap_exit_code=1, with_venv=False)
+                out = _run_launcher(bat, bootstrap_exit_code=1, with_venv=False).out
                 self.assertNotIn(START_MARKER, out)
 
     def test_starts_app_when_bootstrap_succeeds(self):
         # 對照組:正常情況不能被擋掉(修完不能變成什麼都不讓啟動)
         for bat in LAUNCHERS:
             with self.subTest(bat=Path(bat).name):
-                out = _run_launcher(bat, bootstrap_exit_code=0, with_venv=True)
+                out = _run_launcher(bat, bootstrap_exit_code=0, with_venv=True).out
                 self.assertIn(START_MARKER, out)
 
     def test_starts_app_even_when_launched_from_another_directory(self):
@@ -71,15 +76,25 @@ class LauncherBatTest(unittest.TestCase):
         # 檢查必須靠 .bat 自己的位置找檔案,不能靠執行資料夾
         for bat in LAUNCHERS:
             with self.subTest(bat=Path(bat).name):
-                out = _run_launcher(bat, bootstrap_exit_code=0, with_venv=True, cwd_is_bat_dir=False)
+                out = _run_launcher(bat, bootstrap_exit_code=0, with_venv=True, cwd_is_bat_dir=False).out
                 self.assertIn(START_MARKER, out)
 
     def test_ignores_a_venv_that_only_exists_in_the_current_directory(self):
         # .bat 自己的資料夾沒有 venv、只有 cwd 剛好有一個:不能被 cwd 那個蒙混過關
         for bat in LAUNCHERS:
             with self.subTest(bat=Path(bat).name):
-                out = _run_launcher(bat, bootstrap_exit_code=0, with_venv=False, cwd_has_venv=True, cwd_is_bat_dir=False)
+                out = _run_launcher(bat, bootstrap_exit_code=0, with_venv=False, cwd_has_venv=True,
+                                    cwd_is_bat_dir=False).out
                 self.assertNotIn(START_MARKER, out)
+
+    def test_startup_log_is_written_next_to_the_launcher_not_the_current_directory(self):
+        # startup.log 要跟專案放一起;寫到「執行當下的資料夾」會亂丟檔案,
+        # 那個資料夾唯讀(例如 C:\\Windows\\System32)時甚至會讓後面的指令根本不執行
+        for bat in LAUNCHERS:
+            with self.subTest(bat=Path(bat).name):
+                run = _run_launcher(bat, bootstrap_exit_code=0, with_venv=True, cwd_is_bat_dir=False)
+                self.assertTrue(run.log_next_to_bat)
+                self.assertFalse(run.log_in_cwd)
 
 
 if __name__ == "__main__":
