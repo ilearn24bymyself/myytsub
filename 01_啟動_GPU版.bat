@@ -14,11 +14,18 @@ set MODE=GPU
 echo [System] 檢查執行環境...
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"
-if not exist "venv\python.exe" (
+:: 兩道都要過才往下:bootstrap.ps1 的結束代碼(它任何一步失敗都會 exit 1),
+:: 以及 venv 真的在。只看 venv 不夠——Python 那步成功、Electron 那步失敗時 venv 還是在。
+:: 路徑一律用 %~dp0(這個 .bat 自己的位置),不依賴「從哪個資料夾執行」。
+set SETUP_FAILED=0
+if errorlevel 1 set SETUP_FAILED=1
+if not exist "%~dp0venv\python.exe" set SETUP_FAILED=1
+if "%SETUP_FAILED%"=="1" (
     echo.
     echo [錯誤] 自動安裝失敗，請檢查網路連線後重新執行這個檔案。
+    echo [錯誤] 上面最後幾行標示 [ERROR] 的就是失敗原因，網路瞬斷時重新雙擊一次通常就會成功。
     pause
-    exit /b
+    exit /b 1
 )
 
 echo [System] Starting Electron app...

@@ -12,6 +12,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
+. (Join-Path $root "bootstrap_helpers.ps1")
 
 # PyTorch 在 site-packages\torch\include\...\*.h 底下有很深的巢狀路徑,
 # 加上 venv\Lib\site-packages\torch\include\... 這段前綴,最長的檔名組合起來
@@ -82,7 +83,14 @@ if (-not (Test-Path $pythonExe)) {
 
     $pyZip = Join-Path $root "python_3.10.11.zip"
     $pyUrl = "https://www.nuget.org/api/v2/package/python/3.10.11"
-    Invoke-DownloadWithProgress -Uri $pyUrl -OutFile $pyZip -Label "下載Python執行環境"
+    $ok = Invoke-WithRetry -Label "Python download" -Attempt {
+        Invoke-DownloadWithProgress -Uri $pyUrl -OutFile $pyZip -Label "下載Python執行環境" | Out-Null
+        $true
+    }
+    if (-not $ok) {
+        Write-Host "[Setup][ERROR] Python download failed after retries. Check your internet connection and run this again."
+        exit 1
+    }
 
     $extractDir = Join-Path $root "_py_extract_tmp"
     if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
@@ -118,9 +126,12 @@ if (-not $packagesOk) {
     $sizeLabel = if ($requestedFlavor -eq "CPU") { "約1GB,不含PyTorch" } else { "約5GB,含PyTorch" }
     Write-Host "[Setup] 正在安裝套件($sizeLabel,這是整個安裝過程最花時間的部分,請耐心等候)..."
     & $pythonExe -m pip install --upgrade pip -q
-    & $pythonExe -m pip install -r $requirementsFile
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $fasterWhisperMarker)) {
-        Write-Host "[Setup][ERROR] Package install failed. Check your internet connection and run this again."
+    $ok = Invoke-WithRetry -Label "pip install" -Attempt {
+        & $pythonExe -m pip install -r $requirementsFile | Out-Host
+        ($LASTEXITCODE -eq 0) -and (Test-Path $fasterWhisperMarker)
+    }
+    if (-not $ok) {
+        Write-Host "[Setup][ERROR] Package install failed after retries. Check your internet connection and run this again."
         exit 1
     }
     Set-Content -Path $flavorMarker -Value $requestedFlavor
@@ -145,7 +156,14 @@ if (-not (Test-Path $nodeExe)) {
     $nodeVersion = "22.11.0"
     $nodeZip = Join-Path $root "node_$nodeVersion.zip"
     $nodeUrl = "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-win-x64.zip"
-    Invoke-DownloadWithProgress -Uri $nodeUrl -OutFile $nodeZip -Label "下載Node.js執行環境"
+    $ok = Invoke-WithRetry -Label "Node.js download" -Attempt {
+        Invoke-DownloadWithProgress -Uri $nodeUrl -OutFile $nodeZip -Label "下載Node.js執行環境" | Out-Null
+        $true
+    }
+    if (-not $ok) {
+        Write-Host "[Setup][ERROR] Node.js download failed after retries. Check your internet connection and run this again."
+        exit 1
+    }
 
     $extractDir = Join-Path $root "_node_extract_tmp"
     if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }
@@ -160,13 +178,21 @@ if (-not (Test-Path $nodeExe)) {
     Write-Host "[Setup] Node.js執行檔已存在,略過解壓縮這步。"
 }
 
-$electronMarker = Join-Path $root "node_modules\electron"
+$electronDir = Join-Path $root "node_modules\electron"
+# 標記用 dist\electron.exe(真正的執行檔),不能只看 node_modules\electron 資料夾在不在:
+# 執行檔是 npm 安裝後期才另外下載的,下載失敗時資料夾可能已經在了,但裡面沒有執行檔。
+$electronMarker = Join-Path $electronDir "dist\electron.exe"
 if (-not (Test-Path $electronMarker)) {
     Write-Host "[Setup] 正在安裝 Electron 及相依套件(第一次會下載約100MB以上,請耐心等候)..."
     $env:PATH = "$nodeDir;$env:PATH"
-    & $npmCmd install --prefix $root
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $electronMarker)) {
-        Write-Host "[Setup][ERROR] npm install failed. Check your internet connection and run this again."
+    $ok = Invoke-WithRetry -Label "npm install (Electron)" -Attempt {
+        # 上一次失敗留下的半成品先清掉,否則 npm 可能判斷「已安裝」而不重新下載執行檔
+        if (Test-Path $electronDir) { Remove-Item -Recurse -Force $electronDir }
+        & $npmCmd install --prefix $root | Out-Host
+        ($LASTEXITCODE -eq 0) -and (Test-Path $electronMarker)
+    }
+    if (-not $ok) {
+        Write-Host "[Setup][ERROR] npm install failed after retries. Check your internet connection and run this again."
         exit 1
     }
     Write-Host "[Setup] Electron 安裝完成。"
@@ -189,7 +215,14 @@ if (-not (Test-Path $ffmpegExe) -or -not (Test-Path $ffprobeExe)) {
 
     $ffZip = Join-Path $root "ffmpeg_tmp.zip"
     $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-    Invoke-DownloadWithProgress -Uri $ffUrl -OutFile $ffZip -Label "下載ffmpeg"
+    $ok = Invoke-WithRetry -Label "ffmpeg download" -Attempt {
+        Invoke-DownloadWithProgress -Uri $ffUrl -OutFile $ffZip -Label "下載ffmpeg" | Out-Null
+        $true
+    }
+    if (-not $ok) {
+        Write-Host "[Setup][ERROR] ffmpeg download failed after retries. Check your internet connection and run this again."
+        exit 1
+    }
 
     $ffExtractDir = Join-Path $root "_ffmpeg_extract_tmp"
     if (Test-Path $ffExtractDir) { Remove-Item -Recurse -Force $ffExtractDir }
