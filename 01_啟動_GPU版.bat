@@ -5,25 +5,28 @@ echo  YT Down Sub Electron - GPU Mode
 echo =========================================
 echo.
 set MODE=GPU
-
-:: 環境檢查/安裝一律交給 bootstrap.ps1 自己判斷(它會分別檢查 Python 套件是否
-:: 裝的是「這次要求的 flavor」、Node.js、Electron、ffmpeg/ffprobe 是否齊全)。
-:: 不在這裡用「檔案存不存在」自己先攔一次——之前這樣寫,GPU 版遇到之前用
-:: CPU 版裝過的環境時,檔案都在就直接跳過安裝,結果拿 CPU 套件硬跑 GPU 模式。
-:: 全都裝好時 bootstrap.ps1 自己幾秒內就會判斷完畢跳過,不會拖慢啟動。
-echo [System] 檢查執行環境...
+:: Keep this file pure ASCII. cmd.exe reads batch files in blocks, and a UTF-8
+:: multibyte character that straddles a block boundary gets garbled, so comment
+:: text turns into bogus commands. Where that happens depends on exact byte
+:: positions and even on the folder path length, so any non-ASCII byte is a risk.
+:: User-facing Chinese text lives in bootstrap.ps1, which has a BOM.
+:: bootstrap.ps1 decides what needs installing: the Python packages for THIS
+:: flavor, Node.js, Electron, ffmpeg. Do not pre-check "does venv exist" here.
+:: After a CPU install that would skip setup and run with the wrong packages.
+echo [System] Checking runtime environment...
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0bootstrap.ps1"
-:: 兩道都要過才往下:bootstrap.ps1 的結束代碼(它任何一步失敗都會 exit 1),
-:: 以及 venv 真的在。只看 venv 不夠——Python 那步成功、Electron 那步失敗時 venv 還是在。
-:: 路徑一律用 %~dp0(這個 .bat 自己的位置),不依賴「從哪個資料夾執行」。
+:: Both checks must pass: the bootstrap.ps1 exit code, because any failed step
+:: exits 1, AND venv present. venv alone is not enough, since the Python step
+:: runs before the Electron step. Paths use %~dp0 - this file's own folder -
+:: never the directory it happened to be started from.
 set SETUP_FAILED=0
 if errorlevel 1 set SETUP_FAILED=1
 if not exist "%~dp0venv\python.exe" set SETUP_FAILED=1
 if "%SETUP_FAILED%"=="1" (
     echo.
-    echo [錯誤] 自動安裝失敗，請檢查網路連線後重新執行這個檔案。
-    echo [錯誤] 上面最後幾行標示 [ERROR] 的就是失敗原因，網路瞬斷時重新雙擊一次通常就會成功。
+    echo [ERROR] Automatic setup failed. Check your internet connection, then run this file again.
+    echo [ERROR] The lines marked [ERROR] above show the reason. A brief network drop usually clears up if you just double-click this file again.
     pause
     exit /b 1
 )

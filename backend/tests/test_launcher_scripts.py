@@ -87,6 +87,13 @@ class LauncherBatTest(unittest.TestCase):
                                     cwd_is_bat_dir=False).out
                 self.assertNotIn(START_MARKER, out)
 
+    def test_the_launch_command_is_one_intact_line(self):
+        # 產生/編輯 .bat 時,路徑裡的 \n 很容易被程式語言當成換行,把這一行切成兩半
+        expected = rb'"%~dp0node_portable\node.exe" "%~dp0node_modules\electron\cli.js" "%~dp0."'
+        for bat in LAUNCHERS:
+            with self.subTest(bat=Path(bat).name):
+                self.assertIn(expected, Path(bat).read_bytes())
+
     def test_startup_log_is_written_next_to_the_launcher_not_the_current_directory(self):
         # startup.log 要跟專案放一起;寫到「執行當下的資料夾」會亂丟檔案,
         # 那個資料夾唯讀(例如 C:\\Windows\\System32)時甚至會讓後面的指令根本不執行
@@ -95,6 +102,17 @@ class LauncherBatTest(unittest.TestCase):
                 run = _run_launcher(bat, bootstrap_exit_code=0, with_venv=True, cwd_is_bat_dir=False)
                 self.assertTrue(run.log_next_to_bat)
                 self.assertFalse(run.log_in_cwd)
+
+
+    def test_launchers_contain_only_ascii_bytes(self):
+        # cmd.exe 分塊讀 .bat,UTF-8 的中文字剛好跨過區塊交界就會被讀壞、註解變成假指令
+        # (使用者實測看到 "... is not recognized")。讀壞哪一行取決於每個字的精確位置,連資料夾
+        # 路徑長度都會影響(同一個檔案短路徑會壞、長路徑正常),所以檔案裡一個非 ASCII 位元組都不能有
+        for bat in LAUNCHERS:
+            with self.subTest(bat=Path(bat).name):
+                data = Path(bat).read_bytes()
+                bad = [i for i, b in enumerate(data) if b > 127]
+                self.assertEqual(bad, [], f"位元組位置 {bad[:5]} 起有非 ASCII 內容")
 
 
 if __name__ == "__main__":
