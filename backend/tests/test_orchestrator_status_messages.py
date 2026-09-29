@@ -100,5 +100,36 @@ class StartedAtTest(unittest.TestCase):
         orch.shutdown()
 
 
+class RetryStartsWithAFreshMessageTest(unittest.TestCase):
+    """被限流的工作按「重試」重跑時,不能沿用上一輪的說明文字:
+    重跑失敗卻還寫著「被 YouTube 限流…」是錯的。"""
+
+    def test_a_retried_job_does_not_show_the_previous_runs_explanation(self):
+        attempts = []
+        seen_while_running = []
+        holder = {}
+
+        def download_fn(payload, cancel_event, pause_event, report_progress):
+            attempts.append(1)
+            seen_while_running.append(holder["orch"].get_job(holder["job_id"]).message)
+            if len(attempts) == 1:
+                raise RateLimited("429")
+            raise Exception("boom")
+
+        orch = Orchestrator(download_fn=download_fn, transcribe_fn=_noop)
+        holder["orch"] = orch
+        holder["job_id"] = orch.enqueue_download("u")
+        orch.wait_idle()
+        self.assertEqual(orch.get_job(holder["job_id"]).state, JobState.PENDING_RETRY)
+
+        orch.retry_pending()
+        orch.wait_idle()
+        job = orch.get_job(holder["job_id"])
+        self.assertEqual(job.state, JobState.ERROR)
+        self.assertIsNone(job.message)                # 結束後不殘留上一輪的限流說明
+        self.assertIsNone(seen_while_running[1])      # 重跑的過程中也不顯示舊文字
+        orch.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

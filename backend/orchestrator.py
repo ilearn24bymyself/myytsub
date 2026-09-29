@@ -175,6 +175,9 @@ class Orchestrator:
 
             job.state = JobState.RUNNING
             job.started_at = time.time()
+            # 重試會沿用同一個 Job:上一輪留下的說明(例如限流)不能出現在這一輪
+            job.message = None
+            job.final_message = None
 
             def report_progress(percent, message=None, final=False, _job=job):
                 """final=True:這句話是工作結束後要留在畫面上的(例如「轉錄完成」)。"""
