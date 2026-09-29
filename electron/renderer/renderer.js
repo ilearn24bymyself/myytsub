@@ -57,6 +57,16 @@ function stateLabel(state) {
 const selectedJobIds = new Set();
 const CANCELLABLE_STATES = new Set(["pending", "running"]);
 
+// Whisper 是一次處理 30 秒音訊才吐出結果,百分比會停一陣子再一次跳一大段;
+// 執行中多顯示「已執行 mm:ss」,持續在跳就代表還在跑,不是當掉
+function formatElapsed(startedAt) {
+  if (!startedAt) return "";
+  const sec = Math.max(0, Math.floor(Date.now() / 1000 - startedAt));
+  const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+  const ss = String(sec % 60).padStart(2, "0");
+  return ` · 已執行 ${mm}:${ss}`;
+}
+
 function renderJobs(jobs) {
   const liveIds = new Set(jobs.map((j) => j.id));
   for (const id of [...selectedJobIds]) {
@@ -71,7 +81,7 @@ function renderJobs(jobs) {
     const stateCell = `
       <span class="state-${job.state}">${stateLabel(job.state)}</span>
       ${job.message ? `<div style="font-size:12px;color:#666">${job.message}</div>` : ""}
-      ${job.state === "running" ? `<div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div><div style="font-size:12px">${percent}%</div>` : ""}
+      ${job.state === "running" ? `<div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div><div style="font-size:12px">${percent}%${formatElapsed(job.started_at)}</div>` : ""}
     `;
     const actions = [];
     if (job.state === "running") {

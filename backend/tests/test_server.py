@@ -97,7 +97,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
 
         fake_orchestrator.enqueue_transcription.assert_not_called()
         fake_record.save.assert_not_called()
-        fake_report_progress.assert_called_once_with(100.0, mock.ANY)
+        fake_report_progress.assert_called_once_with(100.0, mock.ANY, final=True)
         message = fake_report_progress.call_args.args[1]
         self.assertIn("已下載過", message)
 
@@ -233,6 +233,63 @@ class PauseResumeHttpRoutesTest(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()  # 釋放監聽中的 socket,避免測試留下 ResourceWarning
+
+
+class FinalStatusMessagesTest(unittest.TestCase):
+    """使用者實測畫面:工作「完成」了,狀態底下卻還寫「下載中」「轉錄中」。
+    結束時要明確留下「做完了」這句話(final=True),orchestrator 才會用它取代進度文字。"""
+
+    def test_completed_download_leaves_a_final_done_message(self):
+        report = mock.Mock()
+        with mock.patch.object(server, "download_media", return_value=[{"path": "C:/fake/a.mp4"}]),              mock.patch.object(server, "download_record"),              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
+            download_fn = server.make_real_download_fn(mock.Mock())
+            download_fn({"url": "https://youtube.com/watch?v=x"}, mock.Mock(), mock.Mock(), report)
+        report.assert_any_call(100.0, "下載完成", final=True)
+
+    def test_completed_transcription_leaves_a_final_done_message(self):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("文字", [{"start": 0, "end": 1, "text": "文字"}])
+        not_cancelled = mock.Mock()
+        not_cancelled.is_set.return_value = False
+        report = mock.Mock()
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),              mock.patch.object(server, "download_record"),              mock.patch.object(server, "source_lookup"),              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": False},
+                          not_cancelled, mock.Mock(), report)
+        report.assert_any_call(100.0, "轉錄完成", final=True)
+
+    def test_cancelled_transcription_message_is_final(self):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("部分", [])
+        cancelled = mock.Mock()
+        cancelled.is_set.return_value = True
+        report = mock.Mock()
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": True, "skip_existing": False},
+                          cancelled, mock.Mock(), report)
+        report.assert_any_call(0.0, "已取消,不保留部分結果", final=True)
+
+    def test_skipping_an_existing_transcript_message_is_final(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp)
+            (day / "transcripts").mkdir()
+            (day / "transcripts" / "video.txt").write_text("已經有了", encoding="utf-8")
+            report = mock.Mock()
+            with mock.patch.object(server, "Transcriber", return_value=mock.Mock()),                  mock.patch.object(server, "today_dir", return_value=day):
+                transcribe_fn = server.make_real_transcribe_fn()
+                transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": True},
+                              mock.Mock(), mock.Mock(), report)
+        report.assert_any_call(100.0, "已有逐字稿,跳過", final=True)
+
+
+class JobJsonTest(unittest.TestCase):
+    def test_started_at_is_exposed_so_the_screen_can_show_elapsed_time(self):
+        from orchestrator import Job, JobType
+        job = Job("1", JobType.TRANSCRIBE, {"path": "C:/x.mp4"})
+        job.started_at = 1234.5
+        self.assertEqual(server._job_to_dict(job)["started_at"], 1234.5)
 
 
 if __name__ == "__main__":

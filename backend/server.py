@@ -77,9 +77,9 @@ def make_real_download_fn(orchestrator):
             # 盡量把之前下載到哪裡也一併告訴使用者。
             found_path = _find_previously_downloaded_path(payload["url"])
             if found_path:
-                report_progress(100.0, f"已下載過,略過 → {found_path}")
+                report_progress(100.0, f"已下載過,略過 → {found_path}", final=True)
             else:
-                report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)")
+                report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)", final=True)
             return
         download_record.save(downloaded)
         for entry in downloaded:
@@ -89,6 +89,7 @@ def make_real_download_fn(orchestrator):
                 "skip_existing": payload.get("skip_existing", True),
                 "metadata": entry,
             })
+        report_progress(100.0, "下載完成", final=True)
     return _download
 
 
@@ -101,7 +102,7 @@ def make_real_transcribe_fn():
         txt_path = today_dir() / "transcripts" / f"{stem}.txt"
 
         if payload.get("skip_existing", True) and txt_path.is_file():
-            report_progress(100.0, "已有逐字稿,跳過")
+            report_progress(100.0, "已有逐字稿,跳過", final=True)
             return
 
         def _progress(percent):
@@ -114,7 +115,7 @@ def make_real_transcribe_fn():
             # transcribe() 被取消時不會丟例外,只會提早結束、回傳目前算到一半的
             # 部分結果。這裡故意不存檔:半成品跟正常完成的檔案長得一模一樣
             # (同檔名、同位置),留著只會讓人誤以為轉錄完成了。
-            report_progress(0.0, "已取消,不保留部分結果")
+            report_progress(0.0, "已取消,不保留部分結果", final=True)
             return
         # metadata 優先用 payload 帶的(下載完自動接鏈的情況);使用者手動挑
         # 本機檔案轉錄時 payload 沒有 metadata,退回查 download_record;都查
@@ -127,6 +128,7 @@ def make_real_transcribe_fn():
         transcriber.save_transcript(text, str(txt_path), metadata=metadata)
         if payload.get("want_srt", True):
             transcriber.save_srt(segments, str(Path(path).parent / f"{stem}.srt"), metadata=metadata)
+        report_progress(100.0, "轉錄完成", final=True)
     return _transcribe
 
 
@@ -167,6 +169,7 @@ def _job_to_dict(job):
         "progress": job.progress,
         "message": job.message,
         "paused": job.paused,
+        "started_at": job.started_at,
     }
 
 

@@ -10,6 +10,7 @@ import enum
 import itertools
 import queue
 import threading
+import time
 
 
 class JobState(str, enum.Enum):
@@ -29,6 +30,11 @@ class JobType(str, enum.Enum):
     TRANSCRIBE = "transcribe"
 
 
+# 限流後畫面上「待重試」旁邊要說明原因(使用者只看到三個字,不知道為什麼)
+_MSG_RATE_LIMITED = "被 YouTube 限流,稍後按「重試所有待重試項目」"
+_MSG_SKIPPED_BY_LIMIT = "因 YouTube 限流略過,稍後按「重試所有待重試項目」"
+
+
 class RateLimited(Exception):
     """downloader.py 偵測到限流/IP 鎖定訊號時拋出這個,跟一般下載錯誤區分開來。"""
 
@@ -41,7 +47,9 @@ class Job:
         self.state = JobState.PENDING
         self.error_message = None
         self.progress = 0.0
-        self.message = None
+        self.message = None  # 執行中的進度文字;工作結束時會被 final_message 取代
+        self.final_message = None  # 工作自己指定的「結束後要顯示的文字」
+        self.started_at = None  # 開始執行的時間(epoch 秒),畫面用來顯示「已執行 mm:ss」
         self.cancel_event = threading.Event()
         self.pause_event = threading.Event()
         self.pause_event.set()  # 預設「沒被暫停」;清掉這個旗標才是真的暫停
@@ -136,6 +144,9 @@ class Orchestrator:
     def _finish(self, job, state, error_message=None):
         job.state = state
         job.error_message = error_message
+        # 執行中的進度文字(「下載中」「轉錄中」)不能留到工作結束後,
+        # 否則畫面會一邊寫「完成」一邊寫「轉錄中」
+        job.message = job.final_message
         job.paused = False  # 工作結束了,不該還顯示「暫停中」
         if self.on_job_terminal:
             self.on_job_terminal(job)
@@ -152,16 +163,22 @@ class Orchestrator:
                 skip_as_rate_limited = is_download_lane and self._rate_limited
             if skip_as_rate_limited:
                 # 還在被限流的狀態下:不嘗試,直接標記待重試(逐項嘗試只會讓鎖定拖更久)
+                job.final_message = _MSG_SKIPPED_BY_LIMIT
                 self._finish(job, JobState.PENDING_RETRY)
                 q.task_done()
                 continue
 
             job.state = JobState.RUNNING
+            job.started_at = time.time()
 
-            def report_progress(percent, message=None, _job=job):
+            def report_progress(percent, message=None, final=False, _job=job):
+                """final=True:這句話是工作結束後要留在畫面上的(例如「轉錄完成」)。"""
                 _job.progress = percent
                 if message is not None:
-                    _job.message = message
+                    if final:
+                        _job.final_message = message
+                    else:
+                        _job.message = message
 
             try:
                 fn(job.payload, job.cancel_event, job.pause_event, report_progress)
@@ -169,6 +186,7 @@ class Orchestrator:
                 if is_download_lane:
                     with self._lock:
                         self._rate_limited = True
+                job.final_message = _MSG_RATE_LIMITED
                 self._finish(job, JobState.PENDING_RETRY)
             except Exception as e:
                 self._finish(job, JobState.ERROR, str(e))
