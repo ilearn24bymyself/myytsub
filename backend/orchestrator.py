@@ -11,6 +11,7 @@ import itertools
 import queue
 import threading
 import time
+import traceback
 
 
 class JobState(str, enum.Enum):
@@ -113,6 +114,8 @@ class Orchestrator:
             to_retry = [j for j in self._jobs.values() if j.type == JobType.DOWNLOAD and j.state == JobState.PENDING_RETRY]
         for job in to_retry:
             job.state = JobState.PENDING
+            job.message = None  # 排隊中不該還寫著上一輪的限流說明
+            job.final_message = None
             self._download_queue.put(job)
 
     def is_settled(self):
@@ -154,7 +157,12 @@ class Orchestrator:
         job.message = job.final_message
         job.paused = False  # 工作結束了,不該還顯示「暫停中」
         if self.on_job_terminal:
-            self.on_job_terminal(job)
+            # 收尾動作(建總覽頁、開資料夾)失敗不能拖垮工作:例外穿出去會讓這條佇列的
+            # 執行緒直接死掉,之後排在後面的工作永遠不會跑
+            try:
+                self.on_job_terminal(job)
+            except Exception:
+                traceback.print_exc()
 
     def _worker(self, q, fn):
         is_download_lane = q is self._download_queue
@@ -178,6 +186,7 @@ class Orchestrator:
             # 重試會沿用同一個 Job:上一輪留下的說明(例如限流)不能出現在這一輪
             job.message = None
             job.final_message = None
+            job.progress = 0.0
 
             def report_progress(percent, message=None, final=False, _job=job):
                 """final=True:這句話是工作結束後要留在畫面上的(例如「轉錄完成」)。"""

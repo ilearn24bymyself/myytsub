@@ -1,3 +1,5 @@
+import contextlib
+import io
 import sys
 import threading
 import time
@@ -109,10 +111,15 @@ class RetryStartsWithAFreshMessageTest(unittest.TestCase):
         seen_while_running = []
         holder = {}
 
+        seen_progress = []
+
         def download_fn(payload, cancel_event, pause_event, report_progress):
             attempts.append(1)
-            seen_while_running.append(holder["orch"].get_job(holder["job_id"]).message)
+            job = holder["orch"].get_job(holder["job_id"])
+            seen_while_running.append(job.message)
+            seen_progress.append(job.progress)
             if len(attempts) == 1:
+                report_progress(40.0, "下載中")
                 raise RateLimited("429")
             raise Exception("boom")
 
@@ -128,6 +135,61 @@ class RetryStartsWithAFreshMessageTest(unittest.TestCase):
         self.assertEqual(job.state, JobState.ERROR)
         self.assertIsNone(job.message)                # 結束後不殘留上一輪的限流說明
         self.assertIsNone(seen_while_running[1])      # 重跑的過程中也不顯示舊文字
+        self.assertEqual(seen_progress[1], 0.0)       # 百分比也從頭算,不是先顯示上一輪的 40%
+        orch.shutdown()
+
+    def test_a_job_waiting_in_the_queue_after_retry_does_not_show_the_old_explanation(self):
+        release = threading.Event()
+        first_retry_running = threading.Event()
+        state = {"retrying": False}
+
+        def download_fn(payload, cancel_event, pause_event, report_progress):
+            if payload == "hits-limit" and not state["retrying"]:
+                raise RateLimited("429")
+            if state["retrying"] and payload == "hits-limit":
+                first_retry_running.set()
+                release.wait(5)            # 讓這一支卡住,後面那支就會停在排隊中
+
+        orch = Orchestrator(download_fn=download_fn, transcribe_fn=_noop)
+        orch.enqueue_download("hits-limit")
+        queued = orch.enqueue_download("skipped")
+        orch.wait_idle()
+        self.assertIn("限流", orch.get_job(queued).message)
+
+        state["retrying"] = True
+        orch.retry_pending()
+        self.assertTrue(first_retry_running.wait(5))
+        job = orch.get_job(queued)
+        self.assertEqual(job.state, JobState.PENDING)
+        self.assertIsNone(job.message)               # 排隊中不該還寫著上一輪的限流說明
+        release.set()
+        orch.wait_idle()
+        orch.shutdown()
+
+
+class TerminalCallbackFailureTest(unittest.TestCase):
+    """一批跑完時開資料夾、建總覽頁這類收尾動作失敗,絕對不能拖垮工作本身:
+    例外穿出來會讓那條佇列的執行緒直接死掉,後面的工作永遠不會跑。"""
+
+    def test_a_failing_terminal_callback_does_not_kill_the_lane(self):
+        second_ran = threading.Event()
+
+        def download_fn(payload, cancel_event, pause_event, report_progress):
+            if payload == "second":
+                second_ran.set()
+
+        def on_terminal(job):
+            raise RuntimeError("could not build the index")
+
+        orch = Orchestrator(download_fn=download_fn, transcribe_fn=_noop, on_job_terminal=on_terminal)
+        with contextlib.redirect_stderr(io.StringIO()):   # 印出的錯誤追蹤不要洗版測試輸出
+            orch.enqueue_download("first")
+            second = orch.enqueue_download("second")
+            ran = second_ran.wait(3)
+            if ran:
+                orch.wait_idle()
+        self.assertTrue(ran, "第一個工作的收尾回呼丟例外後,這條佇列的執行緒死了")
+        self.assertEqual(orch.get_job(second).state, JobState.DONE)
         orch.shutdown()
 
 
