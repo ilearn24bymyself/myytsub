@@ -115,6 +115,11 @@ class Orchestrator:
             job.state = JobState.PENDING
             self._download_queue.put(job)
 
+    def is_settled(self):
+        """沒有任何工作在排隊或執行。待重試不算——它們在等使用者按重試,不是在跑。"""
+        with self._lock:
+            return all(j.state not in (JobState.PENDING, JobState.RUNNING) for j in self._jobs.values())
+
     def get_job(self, job_id):
         with self._lock:
             return self._jobs[job_id]

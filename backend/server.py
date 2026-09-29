@@ -6,6 +6,7 @@
 """
 import json
 import mimetypes
+import os
 import sys
 import threading
 from datetime import date
@@ -17,7 +18,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent  # 專案根目錄
 STATIC_DIR = BASE_DIR / "electron" / "renderer"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from orchestrator import Orchestrator, JobState  # noqa: E402
+from orchestrator import Orchestrator, JobState, JobType  # noqa: E402
+from batch_completion import BatchCompletion  # noqa: E402
 from downloader import download_media, extract_video_id, fetch_title_only  # noqa: E402
 from yt_dlp.utils import sanitize_filename  # noqa: E402
 from transcriber import Transcriber  # noqa: E402
@@ -32,6 +34,26 @@ def today_dir() -> Path:
     (d / "uploads").mkdir(parents=True, exist_ok=True)
     (d / "transcripts").mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _open_folder(path):
+    """跟舊版 3-4 一樣,一批做完自動用檔案總管打開對應資料夾。
+    開不起來(資料夾不在、不是 Windows、檔案總管出問題)就算了,不能拖累工作本身。"""
+    try:
+        if hasattr(os, "startfile") and os.path.isdir(path):
+            os.startfile(path)
+    except Exception:
+        pass
+
+
+def open_result_folders(done_types):
+    """只開這批「實際有成功」的那種工作對應的資料夾:有下載成功開下載資料夾,
+    有轉錄成功開逐字稿資料夾(只轉錄本機檔案就只開逐字稿)。"""
+    d = today_dir()
+    if JobType.DOWNLOAD in done_types:
+        _open_folder(d / "downloads")
+    if JobType.TRANSCRIBE in done_types:
+        _open_folder(d / "transcripts")
 
 
 def _find_previously_downloaded_path(url: str) -> str | None:
@@ -141,8 +163,14 @@ def build_orchestrator():
     def _download(payload, cancel_event, pause_event, report_progress):
         make_real_download_fn(ref["orchestrator"])(payload, cancel_event, pause_event, report_progress)
 
+    batch = BatchCompletion(
+        is_settled=lambda: ref["orchestrator"].is_settled(),
+        on_complete=open_result_folders,
+    )
+
     def on_job_terminal(job):
         build_day_index(str(today_dir()))
+        batch.on_job_terminal(job)
 
     orchestrator = Orchestrator(
         download_fn=_download,

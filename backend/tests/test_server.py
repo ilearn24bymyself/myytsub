@@ -292,5 +292,52 @@ class JobJsonTest(unittest.TestCase):
         self.assertEqual(server._job_to_dict(job)["started_at"], 1234.5)
 
 
+class AutoOpenFoldersTest(unittest.TestCase):
+    """舊版 3-4 每批做完會自動打開對應資料夾,改寫時漏掉了。"""
+
+    def _run_batch(self, enqueue):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp)
+            fake_transcriber = mock.Mock()
+            fake_transcriber.transcribe.return_value = ("文字", [{"start": 0, "end": 1, "text": "文字"}])
+            with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),                  mock.patch.object(server, "download_media",
+                                   return_value=[{"path": str(day / "downloads" / "a.mp4")}]),                  mock.patch.object(server, "download_record"),                  mock.patch.object(server, "source_lookup"),                  mock.patch.object(server, "build_day_index"),                  mock.patch.object(server, "today_dir", return_value=day),                  mock.patch.object(server, "_open_folder") as fake_open:
+                orch = server.build_orchestrator()
+                enqueue(orch)
+                orch.wait_idle()
+                orch.shutdown()
+            return day, fake_open
+
+    def test_local_file_transcription_opens_only_the_transcripts_folder(self):
+        day, fake_open = self._run_batch(lambda orch: orch.enqueue_transcription(
+            {"path": "C:/fake/v.mp4", "want_srt": False, "skip_existing": False}))
+        fake_open.assert_called_once_with(day / "transcripts")
+
+    def test_download_with_its_chained_transcription_opens_both_folders_once(self):
+        day, fake_open = self._run_batch(lambda orch: orch.enqueue_download(
+            {"url": "https://www.youtube.com/watch?v=abcdefghijk", "want_srt": False, "skip_existing": False}))
+        self.assertEqual(fake_open.call_args_list,
+                         [mock.call(day / "downloads"), mock.call(day / "transcripts")])
+
+
+class OpenFolderTest(unittest.TestCase):
+    def test_opens_an_existing_folder_with_the_file_explorer(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp,              mock.patch.object(server.os, "startfile", create=True) as fake_startfile:
+            server._open_folder(Path(tmp))
+        fake_startfile.assert_called_once_with(Path(tmp))
+
+    def test_does_nothing_when_the_folder_does_not_exist(self):
+        with mock.patch.object(server.os, "startfile", create=True) as fake_startfile:
+            server._open_folder(Path("C:/definitely/not/here"))
+        fake_startfile.assert_not_called()
+
+    def test_a_failure_to_open_never_breaks_the_job(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp,              mock.patch.object(server.os, "startfile", create=True, side_effect=OSError("no explorer")):
+            server._open_folder(Path(tmp))  # 不能丟例外
+
+
 if __name__ == "__main__":
     unittest.main()
