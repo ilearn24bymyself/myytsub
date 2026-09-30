@@ -86,6 +86,7 @@ def make_real_download_fn(orchestrator):
     def _download(payload, cancel_event, pause_event, report_progress):
         d = today_dir()
         handled = set()
+        handled_ids = set()
 
         def _progress(percent):
             report_progress(percent, "下載中")
@@ -94,9 +95,12 @@ def make_real_download_fn(orchestrator):
             # 每一支完成當下就處理:寫影片旁資訊檔、存記錄、排轉錄。一個網址裡後面的影片
             # 被限流時整個 download_media 會丟例外,等它回傳才處理的話前面完成的全部遺失
             key = os.path.normcase(os.path.abspath(entry["path"]))
-            if key in handled:
+            # 同一支影片換了路徑也算處理過:回傳清單的「前 15 字比對」可能找到另一集的檔案
+            if key in handled or (entry.get("video_id") and entry["video_id"] in handled_ids):
                 return
             handled.add(key)
+            if entry.get("video_id"):
+                handled_ids.add(entry["video_id"])
             try:
                 source_sidecar.write(entry["path"], entry)
             except Exception:
@@ -159,7 +163,16 @@ def _resolve_source(payload, path):
     metadata = payload.get("metadata")
     if not metadata and payload.get("source_url"):
         url = payload["source_url"]
-        metadata = fetch_metadata(url) or {"title": None, "channel": None, "url": url, "upload_date": None}
+        metadata = fetch_metadata(url)
+        video_id = extract_video_id(url)
+        if not metadata and video_id:
+            # 查不到資訊(限流、網路):影片旁已有同一支影片的完整資訊就用它(貼的網址形式可能不同),
+            # 別用只有網址的蓋掉
+            if existing and extract_video_id(existing.get("url") or "") == video_id:
+                metadata = existing
+            else:
+                metadata = {"title": None, "channel": None, "url": url, "upload_date": None}
+        # 不是單一影片的網址(頻道、播放清單)又查不到資訊:不當成來源,往下照順序找
     if not metadata:
         metadata = existing or download_record.lookup(path)
     if metadata and metadata.get("url"):

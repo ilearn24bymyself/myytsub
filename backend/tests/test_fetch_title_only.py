@@ -42,6 +42,22 @@ class FetchMetadataTest(unittest.TestCase):
                                   "url": "https://www.youtube.com/watch?v=aaaaaaaaaaa"})
         self.assertEqual(fake_ydl.__enter__.return_value.extract_info.call_args.kwargs, {"download": False})
 
+    def test_only_looks_at_the_single_video_never_a_whole_playlist_or_channel(self):
+        # 使用者貼的網址常帶 &list=;不設 noplaylist 會把整個播放清單(甚至整個頻道)每支都查一遍,
+        # 拿到的還是播放清單的標題,而且容易被限流
+        fake_ydl = mock.MagicMock()
+        fake_ydl.__enter__.return_value.extract_info.return_value = {"title": "t", "webpage_url": "https://x"}
+        with mock.patch.object(downloader.yt_dlp, "YoutubeDL", return_value=fake_ydl) as fake_cls:
+            downloader.fetch_metadata("https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLxyz")
+        params = fake_cls.call_args.args[0]
+        self.assertTrue(params.get("noplaylist"))
+        self.assertEqual(params.get("extract_flat"), "in_playlist")
+
+    def test_a_playlist_or_channel_result_is_not_treated_as_one_video(self):
+        result, _ = self._fetch({"_type": "playlist", "title": "某頻道 - Videos", "entries": [],
+                                 "webpage_url": "https://www.youtube.com/@channel/videos"})
+        self.assertIsNone(result)
+
     def test_returns_none_on_failure(self):
         result, _ = self._fetch(error=Exception("Sign in to confirm you're not a bot"))
         self.assertIsNone(result)

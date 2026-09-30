@@ -261,10 +261,27 @@ document.getElementById("pick-files").addEventListener("click", async () => {
   }));
   pending.push(...added);
   renderPending();
-  for (const item of added) {
-    await lookupSource(item);   // 一支一支查,不要同時對 YouTube 發一堆搜尋
-  }
+  lookupQueue.push(...added);
+  runLookupQueue();
 });
+
+// 全畫面只有一條查詢隊伍:一支一支查,不要同時對 YouTube 發一堆搜尋(再選一批檔案也是排進同一條);
+// 已經被清掉的不查
+const lookupQueue = [];
+let lookupRunning = false;
+
+async function runLookupQueue() {
+  if (lookupRunning) return;
+  lookupRunning = true;
+  try {
+    while (lookupQueue.length > 0) {
+      const item = lookupQueue.shift();
+      if (pending.includes(item)) await lookupSource(item);
+    }
+  } finally {
+    lookupRunning = false;   // 某一支查詢出錯也不能把整條隊伍卡死
+  }
+}
 
 document.getElementById("add-url").addEventListener("click", () => {
   const input = document.getElementById("yt-url");

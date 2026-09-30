@@ -8,8 +8,8 @@ from yt_dlp.utils import DownloadCancelled
 
 from orchestrator import RateLimited
 
-# 跟 download_media() 用同一份,也給 source_lookup.py 拿來核對反查到的
-# video_id 是不是真的下載過(不是模組內部變數,別處要查就得重複算路徑)。
+# 跟 download_media() 用同一份,也給 source_lookup.py 在同名影片有好幾支時
+# 挑出真的下載過的那支(不是模組內部變數,別處要查就得重複算路徑)。
 ARCHIVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'download_archive.txt')
 
 # YouTube 限流/IP 鎖定的已知訊號:HTTP 429、bot-check 提示訊息。
@@ -285,14 +285,16 @@ def extract_video_id(url: str) -> str | None:
 def fetch_metadata(url: str) -> dict | None:
     """只查資訊、不下載:使用者手動貼來源網址時,抓回標題/頻道/上傳日期寫進逐字稿表頭。
     查不到(網路、bot 偵測)就回傳 None,呼叫端至少還有使用者貼的網址可以用。"""
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    # 貼的網址常帶 &list=:只看這一支,不要把整個播放清單/頻道每支都查一遍
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
+            "noplaylist": True, "extract_flat": "in_playlist"}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception:
         return None
-    if not info:
-        return None
+    if not info or info.get("_type") == "playlist":
+        return None  # 貼的是頻道或播放清單,不是單一影片
     meta = _entry_to_meta(info, None)
     return {"title": meta["title"], "channel": meta["channel"],
             "url": meta["url"] or url, "upload_date": meta["upload_date"]}

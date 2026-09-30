@@ -17,7 +17,7 @@ def _cand(video_id, title):
             "url": f"https://www.youtube.com/watch?v={video_id}"}
 
 
-class GuessMetadataTest(unittest.TestCase):
+class FindMetadataTest(unittest.TestCase):
     """手動挑本機檔案轉錄、又查不到下載記錄時,用檔名反查 YouTube 補回出處。
     採信條件:候選影片的標題,套用跟存檔時一樣的換字規則後,要跟檔名「完全相同」。
     錯誤比對比「不知道出處」更糟,所以寧可放棄也不猜。"""

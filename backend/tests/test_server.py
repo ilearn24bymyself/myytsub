@@ -149,6 +149,21 @@ class RateLimitMidDownloadKeepsFinishedItemsTest(unittest.TestCase):
         self.assertEqual(fake_record.save.call_args_list, [mock.call([a]), mock.call([b])])
         self.assertEqual([c.args[0] for c in fake_sidecar.write.call_args_list], [a["path"], b["path"]])
 
+    def test_a_returned_entry_for_an_already_reported_video_at_another_path_is_ignored(self):
+        # download_media 的「前 15 字比對」備用找法可能找到「另一集」的檔案(系列影片標題開頭都一樣),
+        # 回傳的 path 跟即時回報的不同但是同一支影片。不能在那個錯的檔案旁寫這支的資訊檔
+        a = _entry("系列第一集", "aaaaaaaaaaa")
+        wrong_file = dict(a, path="C:/fake/d/downloads/系列第二集.mp4")
+
+        def fake_download_media(url, **kwargs):
+            kwargs["on_item_done"](a)
+            return [wrong_file]
+
+        error, queued, _r, fake_sidecar = self._download(fake_download_media)
+        self.assertIsNone(error)
+        self.assertEqual(queued, [a["path"]])
+        self.assertEqual([c.args[0] for c in fake_sidecar.write.call_args_list], [a["path"]])
+
     def test_an_item_both_reported_and_returned_is_handled_once(self):
         a = _entry("第一支", "aaaaaaaaaaa")
         rescued = {"path": "C:/fake/d/downloads/救回來的.mp4", "title": "救回來的", "channel": None,
@@ -373,6 +388,30 @@ class TranscriptionSourceOrderTest(unittest.TestCase):
         self.assertEqual(used, self.META)   # 使用者當下給的,優先於影片旁舊的資訊檔
         fake_sidecar.write.assert_called_once_with("C:/fake/video.mp4", self.META)
 
+    def test_a_url_only_result_does_not_overwrite_a_richer_sidecar_for_the_same_video(self):
+        # 抓不到詳細資訊時只剩網址;如果影片旁本來就有同一支影片的完整資訊,要用那份,不能蓋掉
+        used, fake_sidecar, _r, _f = self._run({"source_url": self.META["url"]}, sidecar=self.META, fetched=None)
+        self.assertEqual(used, self.META)
+        fake_sidecar.write.assert_not_called()
+
+    def test_the_same_video_pasted_in_another_url_form_still_keeps_the_richer_sidecar(self):
+        # 資訊檔存的是標準網址;使用者貼帶 &list= 或 youtu.be 短網址的同一支影片,也要認得
+        for pasted in ("https://www.youtube.com/watch?v=aaaaaaaaaaa&list=PLxyz", "https://youtu.be/aaaaaaaaaaa"):
+            used, fake_sidecar, _r, _f = self._run({"source_url": pasted}, sidecar=self.META, fetched=None)
+            self.assertEqual(used, self.META, pasted)
+            fake_sidecar.write.assert_not_called()
+
+    def test_a_pasted_channel_or_playlist_url_is_not_recorded_as_the_source(self):
+        # 抓不到資訊、網址又不是單一影片(頻道/播放清單):不採用,照原順序往下找(這裡是影片旁的資訊檔)
+        used, fake_sidecar, _r, _f = self._run(
+            {"source_url": "https://www.youtube.com/@somechannel/videos"}, sidecar=self.META, fetched=None)
+        self.assertEqual(used, self.META)
+        fake_sidecar.write.assert_not_called()
+        used, fake_sidecar, _r, _f = self._run(
+            {"source_url": "https://www.youtube.com/playlist?list=PLxyz"}, sidecar=None, fetched=None)
+        self.assertIsNone(used)
+        fake_sidecar.write.assert_not_called()
+
     def test_a_pasted_url_is_kept_even_if_its_details_cannot_be_fetched(self):
         used, _sc, _r, _f = self._run({"source_url": "https://www.youtube.com/watch?v=bbbbbbbbbbb"}, fetched=None)
         self.assertEqual(used["url"], "https://www.youtube.com/watch?v=bbbbbbbbbbb")
@@ -414,7 +453,9 @@ class FinalStatusMessagesTest(unittest.TestCase):
 
     def test_completed_download_leaves_a_final_done_message(self):
         report = mock.Mock()
-        with mock.patch.object(server, "download_media", return_value=[{"path": "C:/fake/a.mp4"}]),              mock.patch.object(server, "download_record"),              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
+        with mock.patch.object(server, "download_media", return_value=[{"path": "C:/fake/a.mp4"}]), \
+             mock.patch.object(server, "download_record"), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
             download_fn = server.make_real_download_fn(mock.Mock())
             download_fn({"url": "https://youtube.com/watch?v=x"}, mock.Mock(), mock.Mock(), report)
         report.assert_any_call(100.0, "下載完成", final=True)
@@ -425,7 +466,11 @@ class FinalStatusMessagesTest(unittest.TestCase):
         not_cancelled = mock.Mock()
         not_cancelled.is_set.return_value = False
         report = mock.Mock()
-        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),              mock.patch.object(server, "download_record"),              mock.patch.object(server, "source_lookup"),              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "download_record"), \
+             mock.patch.object(server.source_sidecar, "read", return_value=None), \
+             mock.patch.object(server.source_sidecar, "write"), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
             transcribe_fn = server.make_real_transcribe_fn()
             transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": False},
                           not_cancelled, mock.Mock(), report)
@@ -437,7 +482,8 @@ class FinalStatusMessagesTest(unittest.TestCase):
         cancelled = mock.Mock()
         cancelled.is_set.return_value = True
         report = mock.Mock()
-        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
             transcribe_fn = server.make_real_transcribe_fn()
             transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": True, "skip_existing": False},
                           cancelled, mock.Mock(), report)
@@ -450,7 +496,8 @@ class FinalStatusMessagesTest(unittest.TestCase):
             (day / "transcripts").mkdir()
             (day / "transcripts" / "video.txt").write_text("已經有了", encoding="utf-8")
             report = mock.Mock()
-            with mock.patch.object(server, "Transcriber", return_value=mock.Mock()),                  mock.patch.object(server, "today_dir", return_value=day):
+            with mock.patch.object(server, "Transcriber", return_value=mock.Mock()), \
+             mock.patch.object(server, "today_dir", return_value=day):
                 transcribe_fn = server.make_real_transcribe_fn()
                 transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": True},
                               mock.Mock(), mock.Mock(), report)
@@ -474,8 +521,15 @@ class AutoOpenFoldersTest(unittest.TestCase):
             day = Path(tmp)
             fake_transcriber = mock.Mock()
             fake_transcriber.transcribe.return_value = ("文字", [{"start": 0, "end": 1, "text": "文字"}])
-            with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),                  mock.patch.object(server, "download_media",
-                                   return_value=[{"path": str(day / "downloads" / "a.mp4")}]),                  mock.patch.object(server, "download_record"),                  mock.patch.object(server, "source_lookup"),                  mock.patch.object(server, "build_day_index"),                  mock.patch.object(server, "today_dir", return_value=day),                  mock.patch.object(server, "_open_folder") as fake_open:
+            with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "download_media",
+                                   return_value=[{"path": str(day / "downloads" / "a.mp4")}]), \
+             mock.patch.object(server, "download_record"), \
+             mock.patch.object(server.source_sidecar, "read", return_value=None), \
+             mock.patch.object(server.source_sidecar, "write"), \
+             mock.patch.object(server, "build_day_index"), \
+             mock.patch.object(server, "today_dir", return_value=day), \
+             mock.patch.object(server, "_open_folder") as fake_open:
                 orch = server.build_orchestrator()
                 enqueue(orch)
                 orch.wait_idle()
@@ -497,7 +551,8 @@ class AutoOpenFoldersTest(unittest.TestCase):
 class OpenFolderTest(unittest.TestCase):
     def test_opens_an_existing_folder_with_the_file_explorer(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp,              mock.patch.object(server.os, "startfile", create=True) as fake_startfile:
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(server.os, "startfile", create=True) as fake_startfile:
             server._open_folder(Path(tmp))
         fake_startfile.assert_called_once_with(Path(tmp))
 
@@ -508,7 +563,8 @@ class OpenFolderTest(unittest.TestCase):
 
     def test_a_failure_to_open_never_breaks_the_job(self):
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp,              mock.patch.object(server.os, "startfile", create=True, side_effect=OSError("no explorer")):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(server.os, "startfile", create=True, side_effect=OSError("no explorer")):
             server._open_folder(Path(tmp))  # 不能丟例外
 
 
