@@ -274,6 +274,30 @@ class OrchestratorPauseTest(unittest.TestCase):
         orch.wait_idle()
         orch.shutdown()
 
+    def test_cancelling_a_paused_job_wakes_it_up_so_it_can_stop(self):
+        # 真實轉錄迴圈是「先 pause_event.wait()(沒有逾時)、再檢查 cancel_event」:
+        # 暫停中按取消,如果取消不順便解除暫停,迴圈永遠卡在 wait(),取消沒反應、工作也不會結束
+        at_wait = threading.Event()
+
+        def transcribing(payload, cancel_event, pause_event, report_progress):
+            at_wait.set()
+            pause_event.wait()
+            if cancel_event.is_set():
+                return
+
+        orch = Orchestrator(download_fn=lambda p, c, pe, rp: None, transcribe_fn=transcribing)
+        job_id = orch.enqueue_transcription("C:/video.mp4")
+        orch.pause(job_id)
+        self.assertTrue(at_wait.wait(timeout=2))
+
+        orch.cancel(job_id)
+        deadline = time.time() + 2
+        while orch.get_job(job_id).state == JobState.RUNNING and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(orch.get_job(job_id).state, JobState.CANCELLED)
+        self.assertFalse(orch.get_job(job_id).paused)
+        orch.shutdown()
+
     def test_paused_flag_resets_when_a_paused_job_reaches_a_terminal_state(self):
         # 一個工作被暫停後又結束(這裡讓它出錯結束),paused 不該卡在 True,
         # 不然之後任何讀 job.paused 的地方都會被誤導。

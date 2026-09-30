@@ -156,10 +156,12 @@ function renderJobs(jobs) {
   for (const job of jobs) {
     const tr = document.createElement("tr");
     const percent = Math.round(job.progress || 0);
+    // 暫停中:明講「已暫停」,已執行時間不再跳(不然分不出是暫停還是卡住)
+    const isPaused = job.state === "running" && job.paused;
     const stateCell = `
-      <span class="state-${job.state}">${stateLabel(job.state)}</span>
+      <span class="state-${job.state}">${isPaused ? "已暫停" : stateLabel(job.state)}</span>
       ${job.message ? `<div style="font-size:12px;color:#666">${job.message}</div>` : ""}
-      ${job.state === "running" ? `<div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div><div style="font-size:12px">${percent}%${formatElapsed(job.started_at)}</div>` : ""}
+      ${job.state === "running" ? `<div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div><div style="font-size:12px">${percent}%${isPaused ? " · 按「繼續」恢復,或按「取消」放棄" : formatElapsed(job.started_at)}</div>` : ""}
     `;
     const actions = [];
     if (job.state === "running") {

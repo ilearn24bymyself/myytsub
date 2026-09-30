@@ -105,6 +105,46 @@ class JobTableDisplayTest(unittest.TestCase):
         self.assertIn("%", running)
         self.assertIsNotNone(re.search(r"已執行 \d+:\d\d", running), running)
 
+    def test_a_paused_job_says_paused_and_stops_counting_elapsed_time(self):
+        # 使用者實測:按暫停後畫面還是「執行中」、已執行時間照跑,分不出是暫停還是卡住
+        hold = threading.Event()
+
+        def transcribe_fn(payload, cancel_event, pause_event, report_progress):
+            report_progress(30.0, "轉錄中")
+            hold.wait(30)
+
+        orch = Orchestrator(lambda *a: None, transcribe_fn)
+        job_id = orch.enqueue_transcription("long")
+        self.assertTrue(_wait_until(lambda: orch.get_job(job_id).state == JobState.RUNNING
+                                    and orch.get_job(job_id).started_at is not None))
+        orch.pause(job_id)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(orch))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        profile = tempfile.mkdtemp(prefix="chr_")
+        try:
+            result = subprocess.run(
+                [CHROME, "--headless=new", f"--user-data-dir={profile}", "--virtual-time-budget=4000",
+                 "--dump-dom", f"http://127.0.0.1:{srv.server_address[1]}/"],
+                capture_output=True, timeout=120)
+            html = result.stdout.decode("utf-8", errors="replace")
+        finally:
+            hold.set()
+            srv.shutdown()
+            srv.server_close()
+            orch.wait_idle()
+            orch.shutdown()
+            shutil.rmtree(profile, ignore_errors=True)
+
+        row = re.findall(r"<tr>(.*?)</tr>", html.split("<tbody>")[1], re.S)[0]
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        status, actions = cells[4], cells[6]
+        self.assertIn("已暫停", status)
+        self.assertNotIn("已執行", status)
+        self.assertIn("繼續", actions)
+        self.assertIn("取消", actions)
+
 
 if __name__ == "__main__":
     unittest.main()

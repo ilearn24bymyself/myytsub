@@ -136,6 +136,8 @@ class Orchestrator:
         要自己去看 cancel_event 並盡快返回,協調器本身不會強行中斷執行緒。"""
         job = self.get_job(job_id)
         job.cancel_event.set()
+        # 暫停中的工作卡在 pause_event.wait(),看不到 cancel_event;取消要順便解除暫停讓它醒來
+        job.pause_event.set()
 
     def pause(self, job_id):
         """通知一個正在執行的工作暫停。只有會去檢查 pause_event 的工作函式
