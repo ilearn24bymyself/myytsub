@@ -9,6 +9,7 @@ import mimetypes
 import os
 import sys
 import threading
+import traceback
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,12 +21,13 @@ STATIC_DIR = BASE_DIR / "electron" / "renderer"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator import Orchestrator, JobState, JobType  # noqa: E402
 from batch_completion import BatchCompletion  # noqa: E402
-from downloader import download_media, extract_video_id, fetch_title_only  # noqa: E402
+from downloader import download_media, extract_video_id, fetch_metadata, fetch_title_only  # noqa: E402
 from yt_dlp.utils import sanitize_filename  # noqa: E402
 from transcriber import Transcriber  # noqa: E402
 from index_builder import build_day_index  # noqa: E402
 import download_record  # noqa: E402
 import source_lookup  # noqa: E402
+import source_sidecar  # noqa: E402
 
 
 def today_dir() -> Path:
@@ -83,16 +85,40 @@ def make_real_download_fn(orchestrator):
     (例如下載中斷分好幾次、或只是想重新產生逐字稿)也查得回出處。"""
     def _download(payload, cancel_event, pause_event, report_progress):
         d = today_dir()
+        handled = set()
 
         def _progress(percent):
             report_progress(percent, "下載中")
+
+        def _handle(entry):
+            # 每一支完成當下就處理:寫影片旁資訊檔、存記錄、排轉錄。一個網址裡後面的影片
+            # 被限流時整個 download_media 會丟例外,等它回傳才處理的話前面完成的全部遺失
+            key = os.path.normcase(os.path.abspath(entry["path"]))
+            if key in handled:
+                return
+            handled.add(key)
+            try:
+                source_sidecar.write(entry["path"], entry)
+            except Exception:
+                traceback.print_exc()  # 資訊檔寫不了不能擋住轉錄
+            download_record.save([entry])
+            orchestrator.enqueue_transcription({
+                "path": entry["path"],
+                "want_srt": payload.get("want_srt", True),
+                "skip_existing": payload.get("skip_existing", True),
+                "metadata": entry,
+            })
 
         downloaded = download_media(
             payload["url"], output_dir=str(d / "downloads"),
             format_type=payload.get("format_type", "audio"),
             progress_callback=_progress, stop_event=cancel_event,
+            on_item_done=_handle,
         )
-        if not downloaded:
+        # 檔案鎖定重試救回來的檔案不會經過即時回報,這裡補處理(已處理過的會跳過)
+        for entry in downloaded:
+            _handle(entry)
+        if not handled:
             # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
             # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
             # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因,並且
@@ -103,16 +129,47 @@ def make_real_download_fn(orchestrator):
             else:
                 report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)", final=True)
             return
-        download_record.save(downloaded)
-        for entry in downloaded:
-            orchestrator.enqueue_transcription({
-                "path": entry["path"],
-                "want_srt": payload.get("want_srt", True),
-                "skip_existing": payload.get("skip_existing", True),
-                "metadata": entry,
-            })
         report_progress(100.0, "下載完成", final=True)
     return _download
+
+
+def lookup_source(path):
+    """使用者加入本機檔案時就查來源,按開始處理之前畫面上就看得到。
+    順序:影片旁的資訊檔 → 下載記錄 → 用檔名反查 YouTube。反查的結果標成 guessed,
+    畫面會填進網址欄並標「自動找到,請確認」,由使用者決定要不要用。"""
+    found = source_sidecar.read(path)
+    if found:
+        return {"status": "sidecar", "metadata": found}
+    found = download_record.lookup(path)
+    if found and found.get("url"):
+        return {"status": "record", "metadata": found}
+    found = source_lookup.find_metadata(path)
+    if found:
+        return {"status": "guessed", "metadata": found}
+    return {"status": "none", "metadata": None}
+
+
+def _resolve_source(payload, path):
+    """轉錄前決定來源(使用者定的順序):工作自帶的(下載完自動接鏈、或使用者在畫面上
+    確認過的) → 使用者貼的網址 → 影片旁的資訊檔 → 下載記錄 → 都沒有就當本機檔案。
+    轉錄時不自動上 YouTube 反查:那一步在加入清單時做、交給使用者確認,
+    這裡再猜等於蓋過使用者「留空=本機檔案」的決定。
+    找到的來源順手寫成影片旁的資訊檔,下次不用再查。"""
+    existing = source_sidecar.read(path)
+    metadata = payload.get("metadata")
+    if not metadata and payload.get("source_url"):
+        url = payload["source_url"]
+        metadata = fetch_metadata(url) or {"title": None, "channel": None, "url": url, "upload_date": None}
+    if not metadata:
+        metadata = existing or download_record.lookup(path)
+    if metadata and metadata.get("url"):
+        slim = {k: metadata.get(k) for k in ("title", "channel", "url", "upload_date")}
+        if slim != existing:
+            try:
+                source_sidecar.write(path, metadata)
+            except Exception:
+                traceback.print_exc()  # 資訊檔寫不了不影響轉錄
+    return metadata
 
 
 def make_real_transcribe_fn():
@@ -139,12 +196,7 @@ def make_real_transcribe_fn():
             # (同檔名、同位置),留著只會讓人誤以為轉錄完成了。
             report_progress(0.0, "已取消,不保留部分結果", final=True)
             return
-        # metadata 優先用 payload 帶的(下載完自動接鏈的情況);使用者手動挑
-        # 本機檔案轉錄時 payload 沒有 metadata,退回查 download_record;都查
-        # 不到(例如下載當時被限流,yt-dlp 自己也沒拿到 metadata)才用檔名
-        # 反查 YouTube,反查到、且確認在 download_archive.txt 裡才採信,
-        # 查不到才誠實顯示「本機上傳」(不是本工具下載過的檔案)。
-        metadata = payload.get("metadata") or download_record.lookup(path) or source_lookup.guess_metadata(path)
+        metadata = _resolve_source(payload, path)
         # .txt 集中放 transcripts/;.srt 跟原始影音檔放同一個資料夾、同檔名,
         # 這樣播放器才能自動抓到字幕,不用手動搬(沿用 3-4.Yt-down-sub 的慣例)
         transcriber.save_transcript(text, str(txt_path), metadata=metadata)
@@ -255,15 +307,23 @@ def make_handler(orchestrator):
                 })
                 self._send_json(200, {"id": job_id})
             elif path == "/api/jobs/transcribe":
-                job_id = orchestrator.enqueue_transcription({
+                payload = {
                     "path": body["path"],
                     "want_srt": body.get("want_srt", True),
                     "skip_existing": body.get("skip_existing", True),
-                })
+                }
+                # 使用者在畫面上確認過的來源(metadata)或自己貼的網址(source_url);都沒有=本機檔案
+                if body.get("metadata"):
+                    payload["metadata"] = body["metadata"]
+                elif body.get("source_url"):
+                    payload["source_url"] = body["source_url"]
+                job_id = orchestrator.enqueue_transcription(payload)
                 self._send_json(200, {"id": job_id})
             elif path == "/api/jobs/retry":
                 orchestrator.retry_pending()
                 self._send_json(200, {"ok": True})
+            elif path == "/api/lookup-source":
+                self._send_json(200, lookup_source(body["path"]))
             else:
                 # /api/jobs/<id>/<action>,action 是下面這幾種對單一工作下指令的動詞
                 job_action = next((a for a in _JOB_ACTIONS if path.startswith("/api/jobs/") and path.endswith(f"/{a}")), None)

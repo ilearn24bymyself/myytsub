@@ -22,18 +22,96 @@ function describeOpts(opts) {
   return parts.join("、");
 }
 
+// ---- 本機檔案的來源(使用者定的):先找影片旁的資訊檔、再找下載記錄;
+// 都沒有就用檔名反查 YouTube,查到的先填進網址欄讓使用者確認;真的沒有才由使用者貼網址,
+// 留空 = 本機檔案。加入清單的當下就查,按開始之前就看得到 ----
+const SOURCE_LABELS = { sidecar: "影片旁的資訊檔", record: "下載記錄" };
+
+function describeSource(meta) {
+  if (!meta) return "";
+  return [meta.channel, meta.title].filter(Boolean).join(" / ") || meta.url;
+}
+
+function renderSourceLine(item, box) {
+  box.textContent = "";
+  const src = item.source;
+  const line = document.createElement("div");
+  line.className = "source-line";
+  box.appendChild(line);
+  if (src.status === "checking") {
+    line.textContent = "來源：查詢中…";
+    return;
+  }
+  if (src.status === "sidecar" || src.status === "record") {
+    line.textContent = `來源：${describeSource(src.metadata)}（${SOURCE_LABELS[src.status]}）`;
+    line.classList.add("source-ok");
+    return;
+  }
+  line.textContent = src.status === "guessed"
+    ? `自動找到，請確認：${describeSource(src.metadata)}`
+    : "找不到來源，請貼 YouTube 網址（留空＝本機檔案）";
+  line.classList.add(src.status === "guessed" ? "source-guess" : "source-none");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "source-input";
+  input.placeholder = "https://www.youtube.com/watch?v=...";
+  input.value = item.sourceUrl;
+  input.addEventListener("input", () => { item.sourceUrl = input.value; });
+  box.appendChild(input);
+}
+
+async function lookupSource(item) {
+  try {
+    const res = await fetch("/api/lookup-source", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: item.path }),
+    });
+    item.source = await res.json();
+  } catch (e) {
+    item.source = { status: "none", metadata: null };
+  }
+  item.sourceUrl = item.source.status === "guessed" ? item.source.metadata.url : "";
+  if (item.sourceBox) renderSourceLine(item, item.sourceBox);   // 只更新這一列,不打斷別列正在打的字
+  updatePendingButtons();
+}
+
+// 送出轉錄時要帶的來源:確認過的資訊、使用者改貼的網址,或什麼都不帶(=本機檔案)
+function sourceForSubmit(item) {
+  const src = item.source || {};
+  if (src.status === "sidecar" || src.status === "record") return { metadata: src.metadata };
+  const url = (item.sourceUrl || "").trim();
+  if (!url) return {};
+  if (src.status === "guessed" && url === src.metadata.url) return { metadata: src.metadata };
+  return { source_url: url };
+}
+
+function updatePendingButtons() {
+  const hasItems = pending.length > 0;
+  const stillChecking = pending.some((i) => i.source && i.source.status === "checking");
+  const startBtn = document.getElementById("start-btn");
+  startBtn.disabled = !hasItems || stillChecking;
+  startBtn.title = stillChecking ? "還在查詢來源，請稍候" : "";
+  document.getElementById("clear-pending-btn").disabled = !hasItems;
+}
+
 function renderPending() {
   const list = document.getElementById("pending-list");
   list.innerHTML = "";
   for (const item of pending) {
     const li = document.createElement("li");
     const what = item.kind === "download" ? `下載：${item.url}` : `轉錄：${item.path}`;
-    li.textContent = `${what}（${describeOpts(item.opts)}）`;
+    const head = document.createElement("div");
+    head.textContent = `${what}（${describeOpts(item.opts)}）`;
+    li.appendChild(head);
+    if (item.kind === "transcribe") {
+      item.sourceBox = document.createElement("div");
+      renderSourceLine(item, item.sourceBox);
+      li.appendChild(item.sourceBox);
+    }
     list.appendChild(li);
   }
-  const hasItems = pending.length > 0;
-  document.getElementById("start-btn").disabled = !hasItems;
-  document.getElementById("clear-pending-btn").disabled = !hasItems;
+  updatePendingButtons();
 }
 
 // ---- 跟後端溝通 ----
@@ -141,7 +219,10 @@ async function startProcessing() {
       await fetch("/api/jobs/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: item.path, want_srt: item.opts.want_srt, skip_existing: item.opts.skip_existing }),
+        body: JSON.stringify({
+          path: item.path, want_srt: item.opts.want_srt, skip_existing: item.opts.skip_existing,
+          ...sourceForSubmit(item),
+        }),
       });
     }
   }
@@ -175,10 +256,14 @@ document.getElementById("pick-files").addEventListener("click", async () => {
   // 回傳的是使用者選到的檔案在硬碟上的「真實路徑」,不是上傳的位元組內容。
   const paths = await window.electronAPI.pickFiles();
   const opts = currentOptions();
-  for (const p of paths) {
-    pending.push({ kind: "transcribe", path: p, opts });
-  }
+  const added = paths.map((p) => ({
+    kind: "transcribe", path: p, opts, source: { status: "checking", metadata: null }, sourceUrl: "",
+  }));
+  pending.push(...added);
   renderPending();
+  for (const item of added) {
+    await lookupSource(item);   // 一支一支查,不要同時對 YouTube 發一堆搜尋
+  }
 });
 
 document.getElementById("add-url").addEventListener("click", () => {

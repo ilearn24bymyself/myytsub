@@ -16,7 +16,6 @@ from pathlib import Path
 import yt_dlp
 from yt_dlp.utils import sanitize_filename
 
-import download_record
 from downloader import ARCHIVE_FILE
 
 # 存檔時 yt-dlp 會把檔名不能用的字換成長得很像的字(例如 "/" -> "⧸")。拿檔名去搜尋
@@ -75,7 +74,9 @@ def _pick_exact_match(stem: str, candidates: list):
     return in_archive[0] if len({c["video_id"] for c in in_archive}) == 1 else None
 
 
-def guess_metadata(path: str) -> dict | None:
+def find_metadata(path: str) -> dict | None:
+    """只查不存:結果要先給使用者確認(加入清單時顯示「自動找到,請確認」),
+    確認後由轉錄流程寫成影片旁的資訊檔。"""
     stem = Path(path).stem
     try:
         candidate = _pick_exact_match(stem, _search_candidates(_search_query(stem)))
@@ -83,12 +84,5 @@ def guess_metadata(path: str) -> dict | None:
         return None
     if not candidate:
         return None
-
-    metadata = {
-        "title": candidate["title"], "channel": candidate["channel"],
-        "url": candidate["url"], "upload_date": None,
-    }
-    # download_record.save() 只存 title/channel/url/upload_date,不留 video_id
-    # (lookup() 從來不需要它),這裡就不傳,避免看起來像有存實際上被丟掉。
-    download_record.save([{"path": path, **metadata}])
-    return metadata
+    return {"title": candidate["title"], "channel": candidate["channel"],
+            "url": candidate["url"], "upload_date": None}

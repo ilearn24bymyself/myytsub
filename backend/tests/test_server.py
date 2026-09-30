@@ -20,6 +20,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
 
         with mock.patch.object(server, "download_media") as fake_download_media, \
              mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")):
             fake_download_media.return_value = [
                 {"path": "C:/fake/20260924/downloads/影片一.mp4", "title": "影片一", "channel": "頻道A",
@@ -40,8 +41,11 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
         ])
         # format_type 要真的傳給 download_media,不是永遠寫死 audio
         self.assertEqual(fake_download_media.call_args.kwargs["format_type"], "video")
-        # 下載完成要把 metadata 存進記錄,之後使用者手動挑同一份檔案轉錄才查得回出處
-        fake_record.save.assert_called_once_with(fake_download_media.return_value)
+        # 每支影片各存一次記錄,並在影片旁寫資訊檔(影片搬家資訊也跟著走)
+        entries = fake_download_media.return_value
+        self.assertEqual(fake_record.save.call_args_list, [mock.call([entries[0]]), mock.call([entries[1]])])
+        self.assertEqual(fake_sidecar.write.call_args_list,
+                         [mock.call(entries[0]["path"], entries[0]), mock.call(entries[1]["path"], entries[1])])
 
     def test_already_archived_video_reports_the_previous_path_when_found_via_record(self):
         fake_orchestrator = mock.Mock()
@@ -102,6 +106,119 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
         self.assertIn("已下載過", message)
 
 
+def _entry(name, vid):
+    return {"path": f"C:/fake/d/downloads/{name}.mp4", "title": name, "channel": "頻道",
+            "url": f"https://www.youtube.com/watch?v={vid}", "upload_date": None, "video_id": vid}
+
+
+class RateLimitMidDownloadKeepsFinishedItemsTest(unittest.TestCase):
+    """使用者實測:頻道/播放清單網址下載到一半被 YouTube 限流,已經下載完的那幾支的
+    來源和自動轉錄全部被丟掉,只能手動轉錄、變成「本機上傳」。"""
+
+    def _download(self, fake_download_media, sidecar_error=None):
+        fake_orchestrator = mock.Mock()
+        with mock.patch.object(server, "download_media", side_effect=fake_download_media), \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/d")), \
+             mock.patch("traceback.print_exc"):
+            if sidecar_error:
+                fake_sidecar.write.side_effect = sidecar_error
+            error = None
+            try:
+                server.make_real_download_fn(fake_orchestrator)(
+                    {"url": "https://www.youtube.com/@channel", "want_srt": True, "skip_existing": True},
+                    mock.Mock(), mock.Mock(), mock.Mock())
+            except Exception as e:  # noqa: BLE001 - 測試要檢查丟出來的是什麼
+                error = e
+        queued = [c.args[0]["path"] for c in fake_orchestrator.enqueue_transcription.call_args_list]
+        return error, queued, fake_record, fake_sidecar
+
+    def test_items_finished_before_the_rate_limit_are_recorded_and_queued(self):
+        from orchestrator import RateLimited
+        a, b = _entry("第一支", "aaaaaaaaaaa"), _entry("第二支", "bbbbbbbbbbb")
+
+        def fake_download_media(url, **kwargs):
+            kwargs["on_item_done"](a)
+            kwargs["on_item_done"](b)
+            raise RateLimited("HTTP Error 429")
+
+        error, queued, fake_record, fake_sidecar = self._download(fake_download_media)
+        self.assertIsInstance(error, RateLimited)   # 工作本身照樣變「待重試」
+        self.assertEqual(queued, [a["path"], b["path"]])
+        self.assertEqual(fake_record.save.call_args_list, [mock.call([a]), mock.call([b])])
+        self.assertEqual([c.args[0] for c in fake_sidecar.write.call_args_list], [a["path"], b["path"]])
+
+    def test_an_item_both_reported_and_returned_is_handled_once(self):
+        a = _entry("第一支", "aaaaaaaaaaa")
+        rescued = {"path": "C:/fake/d/downloads/救回來的.mp4", "title": "救回來的", "channel": None,
+                   "url": None, "upload_date": None, "video_id": None}
+
+        def fake_download_media(url, **kwargs):
+            kwargs["on_item_done"](a)
+            return [a, rescued]   # 檔案鎖定重試救回來的那支不會經過即時回報
+
+        error, queued, _r, _s = self._download(fake_download_media)
+        self.assertIsNone(error)
+        self.assertEqual(queued, [a["path"], rescued["path"]])
+
+    def test_failing_to_write_the_sidecar_does_not_stop_the_transcription_being_queued(self):
+        a = _entry("第一支", "aaaaaaaaaaa")
+        error, queued, _r, _s = self._download(lambda url, **kwargs: [a], sidecar_error=OSError("disk full"))
+        self.assertIsNone(error)
+        self.assertEqual(queued, [a["path"]])
+
+
+class LookupSourceTest(unittest.TestCase):
+    """加入本機檔案時就查來源,按開始之前使用者就看得到:影片旁的資訊檔 → 下載記錄
+    → 用檔名反查 YouTube(結果標成「自動找到,請確認」,由使用者決定)→ 找不到。"""
+
+    META = {"title": "t", "channel": "c", "url": "https://www.youtube.com/watch?v=ccccccccccc", "upload_date": None}
+
+    def _lookup(self, sidecar=None, record=None, guessed=None):
+        with mock.patch.object(server, "source_sidecar") as fake_sidecar, \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "source_lookup") as fake_lookup:
+            fake_sidecar.read.return_value = sidecar
+            fake_record.lookup.return_value = record
+            fake_lookup.find_metadata.return_value = guessed
+            return server.lookup_source("C:/fake/video.mp4"), fake_lookup
+
+    def test_sidecar_first_and_no_network(self):
+        result, fake_lookup = self._lookup(sidecar=self.META, record={"url": "x"}, guessed={"url": "y"})
+        self.assertEqual(result, {"status": "sidecar", "metadata": self.META})
+        fake_lookup.find_metadata.assert_not_called()
+
+    def test_then_the_download_record(self):
+        result, fake_lookup = self._lookup(record=self.META, guessed={"url": "y"})
+        self.assertEqual(result, {"status": "record", "metadata": self.META})
+        fake_lookup.find_metadata.assert_not_called()
+
+    def test_then_a_youtube_guess_for_the_user_to_confirm(self):
+        result, _ = self._lookup(guessed=self.META)
+        self.assertEqual(result, {"status": "guessed", "metadata": self.META})
+
+    def test_nothing_found(self):
+        result, _ = self._lookup()
+        self.assertEqual(result, {"status": "none", "metadata": None})
+
+    def test_http_route(self):
+        import json
+        from http.server import ThreadingHTTPServer
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(mock.Mock()))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with mock.patch.object(server, "lookup_source", return_value={"status": "none", "metadata": None}) as fake:
+                req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/api/lookup-source",
+                                             data=json.dumps({"path": "C:/x/影片.mp4"}).encode("utf-8"), method="POST")
+                body = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+            fake.assert_called_once_with("C:/x/影片.mp4")
+            self.assertEqual(body, {"status": "none", "metadata": None})
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 class CancelledTranscriptionDiscardsPartialOutputTest(unittest.TestCase):
     """使用者實測抓到的 bug:轉錄中途取消,系統仍然把「取消當下已經算出來的
     部分結果」存成 .txt/.srt,檔名、位置都跟正常完成的檔案一模一樣,完全看不出
@@ -157,7 +274,9 @@ class TranscriptionMetadataProvenanceTest(unittest.TestCase):
 
         with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
              mock.patch.object(server, "download_record") as fake_record:
+            fake_sidecar.read.return_value = None
             transcribe_fn = server.make_real_transcribe_fn()
             transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": True, "skip_existing": False,
                            "metadata": metadata},
@@ -178,7 +297,9 @@ class TranscriptionMetadataProvenanceTest(unittest.TestCase):
 
         with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
              mock.patch.object(server, "download_record") as fake_record:
+            fake_sidecar.read.return_value = None
             fake_record.lookup.return_value = recorded_metadata
             transcribe_fn = server.make_real_transcribe_fn()
             # payload 沒有 metadata 這個鍵,模擬使用者手動挑本機檔案
@@ -188,26 +309,78 @@ class TranscriptionMetadataProvenanceTest(unittest.TestCase):
         fake_record.lookup.assert_called_once_with("C:/fake/video.mp4")
         fake_transcriber.save_transcript.assert_called_once_with("完整結果", mock.ANY, metadata=recorded_metadata)
 
-    def test_falls_back_to_source_lookup_when_record_also_has_nothing(self):
+    def test_does_not_search_youtube_at_transcription_time(self):
+        # 使用者決定:找不到來源時由他在加入清單時確認/提供;轉錄時自動去猜,
+        # 等於蓋過他「留空=本機檔案」的決定
         fake_transcriber = mock.Mock()
-        fake_transcriber.transcribe.return_value = ("完整結果", [{"start": 0, "end": 1, "text": "完整結果"}])
+        fake_transcriber.transcribe.return_value = ("文字", [])
         not_cancelled = mock.Mock()
         not_cancelled.is_set.return_value = False
-        guessed_metadata = {"title": "反查到的影片", "channel": "某頻道",
-                             "url": "https://youtube.com/watch?v=guessed", "upload_date": None}
-
         with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
              mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
              mock.patch.object(server, "source_lookup") as fake_lookup:
             fake_record.lookup.return_value = None
-            fake_lookup.guess_metadata.return_value = guessed_metadata
+            fake_sidecar.read.return_value = None
             transcribe_fn = server.make_real_transcribe_fn()
             transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": False},
                           not_cancelled, mock.Mock(), mock.Mock())
+        fake_lookup.find_metadata.assert_not_called()
+        fake_transcriber.save_transcript.assert_called_once_with("文字", mock.ANY, metadata=None)
 
-        fake_lookup.guess_metadata.assert_called_once_with("C:/fake/video.mp4")
-        fake_transcriber.save_transcript.assert_called_once_with("完整結果", mock.ANY, metadata=guessed_metadata)
+
+class TranscriptionSourceOrderTest(unittest.TestCase):
+    """轉錄前找來源的順序(使用者定的):工作自帶的 → 使用者貼的網址 → 影片旁的資訊檔
+    → 下載記錄 → 都沒有就當本機檔案。找到的會寫成影片旁的資訊檔,下次不用再查。"""
+
+    META = {"title": "舊影片", "channel": "頻道C", "url": "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+            "upload_date": "2026-09-01"}
+
+    def _run(self, payload, sidecar=None, record=None, fetched=None):
+        fake_transcriber = mock.Mock()
+        fake_transcriber.transcribe.return_value = ("文字", [])
+        not_cancelled = mock.Mock()
+        not_cancelled.is_set.return_value = False
+        with mock.patch.object(server, "Transcriber", return_value=fake_transcriber), \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260924")), \
+             mock.patch.object(server, "download_record") as fake_record, \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
+             mock.patch.object(server, "fetch_metadata", return_value=fetched) as fake_fetch:
+            fake_sidecar.read.return_value = sidecar
+            fake_record.lookup.return_value = record
+            transcribe_fn = server.make_real_transcribe_fn()
+            transcribe_fn(dict({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": False}, **payload),
+                          not_cancelled, mock.Mock(), mock.Mock())
+        used = fake_transcriber.save_transcript.call_args.kwargs["metadata"]
+        return used, fake_sidecar, fake_record, fake_fetch
+
+    def test_sidecar_next_to_the_video_is_used_first(self):
+        used, fake_sidecar, fake_record, _f = self._run({}, sidecar=self.META, record={"url": "https://other"})
+        self.assertEqual(used, self.META)
+        fake_record.lookup.assert_not_called()
+        fake_sidecar.write.assert_not_called()   # 已經有了,不重寫
+
+    def test_download_record_is_the_fallback_and_its_result_becomes_a_sidecar(self):
+        used, fake_sidecar, _r, _f = self._run({}, sidecar=None, record=self.META)
+        self.assertEqual(used, self.META)
+        fake_sidecar.write.assert_called_once_with("C:/fake/video.mp4", self.META)
+
+    def test_a_url_pasted_by_the_user_is_looked_up_and_saved_next_to_the_video(self):
+        used, fake_sidecar, _r, fake_fetch = self._run(
+            {"source_url": self.META["url"]}, sidecar={"url": "https://stale"}, fetched=self.META)
+        fake_fetch.assert_called_once_with(self.META["url"])
+        self.assertEqual(used, self.META)   # 使用者當下給的,優先於影片旁舊的資訊檔
+        fake_sidecar.write.assert_called_once_with("C:/fake/video.mp4", self.META)
+
+    def test_a_pasted_url_is_kept_even_if_its_details_cannot_be_fetched(self):
+        used, _sc, _r, _f = self._run({"source_url": "https://www.youtube.com/watch?v=bbbbbbbbbbb"}, fetched=None)
+        self.assertEqual(used["url"], "https://www.youtube.com/watch?v=bbbbbbbbbbb")
+
+    def test_metadata_carried_by_the_job_wins_and_is_saved_next_to_the_video(self):
+        used, fake_sidecar, _r, _f = self._run({"metadata": self.META}, sidecar=None)
+        self.assertEqual(used, self.META)
+        fake_sidecar.write.assert_called_once_with("C:/fake/video.mp4", self.META)
 
 
 class PauseResumeHttpRoutesTest(unittest.TestCase):

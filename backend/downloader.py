@@ -1,7 +1,9 @@
 import os
 import re
 import time
+import traceback
 import yt_dlp
+from yt_dlp.postprocessor.common import PostProcessor
 from yt_dlp.utils import DownloadCancelled
 
 from orchestrator import RateLimited
@@ -78,8 +80,30 @@ def _entry_to_meta(entry: dict, path: str) -> dict:
     }
 
 
+class _ReportFinishedItem(PostProcessor):
+    """每一支影片「下載完、轉檔完、搬到最終位置」的當下就回報一次。
+
+    一個頻道/播放清單網址會連續下載很多支;中途被 YouTube 限流時整個 extract_info
+    會丟例外,等它回傳才處理的話,已經下載完的那幾支的來源和自動轉錄會全部被丟掉
+    (使用者實測:只好手動轉錄,結果顯示「本機上傳」)。"""
+
+    def __init__(self, on_item_done):
+        super().__init__()
+        self._on_item_done = on_item_done
+
+    def run(self, info):
+        path = info.get("filepath")
+        if path:
+            try:
+                self._on_item_done(_entry_to_meta(info, path))
+            except Exception:
+                # 回報端出錯(例如排轉錄失敗)不能讓下載本身中止
+                traceback.print_exc()
+        return [], info
+
+
 def download_media(url: str, output_dir: str, format_type: str = "audio",
-                   status_callback=None, progress_callback=None, stop_event=None):
+                   status_callback=None, progress_callback=None, stop_event=None, on_item_done=None):
     """
     使用 yt-dlp 下載 YouTube 影片或播放清單。
     format_type     : 'audio' (mp3) 或 'video' (mp4)
@@ -87,6 +111,8 @@ def download_media(url: str, output_dir: str, format_type: str = "audio",
     progress_callback: fn(float) — 傳送 0.0~100.0 進度給 UI 更新進度條
     stop_event      : threading.Event — 背景執行緒下載中途若被設定，會在下一次
                        yt-dlp 進度回呼時中斷這支影片的下載(拋出 DownloadCancelled)。
+    on_item_done    : fn(dict) — 每一支影片完成、檔案已在最終位置時立刻呼叫(dict 格式同回傳值)。
+                       之後就算下載中途失敗/被限流而丟出例外,已回報的那幾支也不會遺失。
     回傳下載完成的清單，每個元素是 dict：
         {"path": str, "title": str|None, "channel": str|None,
          "url": str|None, "upload_date": str|None, "video_id": str|None}
@@ -137,6 +163,8 @@ def download_media(url: str, output_dir: str, format_type: str = "audio",
     info = None
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        if on_item_done is not None:
+            ydl.add_post_processor(_ReportFinishedItem(on_item_done), when="after_move")
         try:
             info = ydl.extract_info(url, download=True)
 
@@ -252,6 +280,22 @@ def extract_video_id(url: str) -> str | None:
     解析不出來就回傳 None,呼叫端要能處理拿不到 ID 的情況。"""
     m = _VIDEO_ID_RE.search(url)
     return m.group(1) if m else None
+
+
+def fetch_metadata(url: str) -> dict | None:
+    """只查資訊、不下載:使用者手動貼來源網址時,抓回標題/頻道/上傳日期寫進逐字稿表頭。
+    查不到(網路、bot 偵測)就回傳 None,呼叫端至少還有使用者貼的網址可以用。"""
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return None
+    if not info:
+        return None
+    meta = _entry_to_meta(info, None)
+    return {"title": meta["title"], "channel": meta["channel"],
+            "url": meta["url"] or url, "upload_date": meta["upload_date"]}
 
 
 def fetch_title_only(url: str) -> str | None:

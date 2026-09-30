@@ -24,27 +24,23 @@ class GuessMetadataTest(unittest.TestCase):
 
     def _guess(self, candidates, archive=(), stem=REAL_STEM):
         with mock.patch.object(source_lookup, "_search_candidates", return_value=candidates) as fake_search, \
-             mock.patch.object(source_lookup, "_load_archive_ids", return_value=set(archive)), \
-             mock.patch.object(source_lookup, "download_record") as fake_record:
-            result = source_lookup.guess_metadata(f"C:/fake/{stem}.mp4")
-        return result, fake_search, fake_record
+             mock.patch.object(source_lookup, "_load_archive_ids", return_value=set(archive)):
+            result = source_lookup.find_metadata(f"C:/fake/{stem}.mp4")
+        return result, fake_search, None
 
     def test_finds_the_users_real_file_whose_title_contained_a_slash(self):
         # 使用者實測:檔名裡的 "⧸" 讓原本的搜尋回傳 0 筆,所以顯示「無法取得來源」
-        result, fake_search, fake_record = self._guess([_cand("FfN6As_5doQ", REAL_TITLE)])
+        result, fake_search, _ = self._guess([_cand("FfN6As_5doQ", REAL_TITLE)])
         self.assertEqual(result["url"], "https://www.youtube.com/watch?v=FfN6As_5doQ")
         queried = fake_search.call_args.args[0]
         self.assertNotIn("⧸", queried)   # 搜尋字串要把存檔時換掉的字換回來
-        fake_record.save.assert_called_once_with([{
-            "path": f"C:/fake/{REAL_STEM}.mp4", "title": REAL_TITLE, "channel": "某頻道",
-            "url": "https://www.youtube.com/watch?v=FfN6As_5doQ", "upload_date": None,
-        }])
+        self.assertEqual(result, {"title": REAL_TITLE, "channel": "某頻道",
+                                  "url": "https://www.youtube.com/watch?v=FfN6As_5doQ", "upload_date": None})
 
     def test_rejects_a_different_episode_even_if_it_is_in_the_archive(self):
         # 整個系列都下載過時,搜到相鄰的另一集也會「在 archive 裡」——不能因此採信
-        result, _search, fake_record = self._guess([_cand("other", NEXT_EPISODE_TITLE)], archive={"other"})
+        result, _search, _ = self._guess([_cand("other", NEXT_EPISODE_TITLE)], archive={"other"})
         self.assertIsNone(result)
-        fake_record.save.assert_not_called()
 
     def test_accepts_an_exact_title_match_even_if_not_in_the_archive(self):
         # 用別的工具下載的檔案不在本工具的 archive 裡;標題完全相同已經足以確認
@@ -62,10 +58,9 @@ class GuessMetadataTest(unittest.TestCase):
         self.assertEqual(result["url"], "https://www.youtube.com/watch?v=FfN6As_5doQ")
 
     def test_several_exact_matches_none_in_archive_gives_up_instead_of_guessing(self):
-        result, _search, fake_record = self._guess(
+        result, _search, _ = self._guess(
             [_cand("a", REAL_TITLE), _cand("b", REAL_TITLE)], archive=set())
         self.assertIsNone(result)
-        fake_record.save.assert_not_called()
 
     def test_returns_none_when_search_finds_nothing(self):
         result, _search, _record = self._guess([])
@@ -73,7 +68,7 @@ class GuessMetadataTest(unittest.TestCase):
 
     def test_search_failure_returns_none_instead_of_raising(self):
         with mock.patch.object(source_lookup, "_search_candidates", side_effect=Exception("network down")):
-            self.assertIsNone(source_lookup.guess_metadata(f"C:/fake/{REAL_STEM}.mp4"))
+            self.assertIsNone(source_lookup.find_metadata(f"C:/fake/{REAL_STEM}.mp4"))
 
 
 class SearchQueryTest(unittest.TestCase):
