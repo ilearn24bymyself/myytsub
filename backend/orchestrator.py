@@ -138,6 +138,14 @@ class Orchestrator:
         job.cancel_event.set()
         # 暫停中的工作卡在 pause_event.wait(),看不到 cancel_event;取消要順便解除暫停讓它醒來
         job.pause_event.set()
+        # 還在排隊的:當下就標成已取消,不用等輪到它(工作線程取出時會跳過)。
+        # 跟工作線程「開始執行」的轉換用同一把鎖,不會一邊被取消一邊開跑
+        with self._lock:
+            cancel_now = job.state == JobState.PENDING
+            if cancel_now:
+                job.state = JobState.CANCELLED
+        if cancel_now:
+            self._finish(job, JobState.CANCELLED)
 
     def pause(self, job_id):
         """通知一個正在執行的工作暫停。只有會去檢查 pause_event 的工作函式
@@ -175,7 +183,13 @@ class Orchestrator:
                 return
 
             with self._lock:
+                already_cancelled = job.state == JobState.CANCELLED
                 skip_as_rate_limited = is_download_lane and self._rate_limited
+                if not already_cancelled and not skip_as_rate_limited:
+                    job.state = JobState.RUNNING   # 跟 cancel() 同一把鎖:取消排隊中的工作不會跟開跑賽跑
+            if already_cancelled:
+                q.task_done()   # 排隊時就被取消了(cancel() 已經收尾過),直接跳過
+                continue
             if skip_as_rate_limited:
                 # 還在被限流的狀態下:不嘗試,直接標記待重試(逐項嘗試只會讓鎖定拖更久)
                 job.final_message = _MSG_SKIPPED_BY_LIMIT
@@ -183,7 +197,6 @@ class Orchestrator:
                 q.task_done()
                 continue
 
-            job.state = JobState.RUNNING
             job.started_at = time.time()
             # 重試會沿用同一個 Job:上一輪留下的說明(例如限流)不能出現在這一輪
             job.message = None

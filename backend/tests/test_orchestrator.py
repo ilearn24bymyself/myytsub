@@ -214,6 +214,55 @@ class OrchestratorCancelTest(unittest.TestCase):
         orch.shutdown()
 
 
+class OrchestratorCancelQueuedTest(unittest.TestCase):
+    """排隊中的工作按取消,當下就要變成「已取消」,不用等輪到它;輪到時也不能真的執行。"""
+
+    def _busy_orchestrator(self, ran, terminal=None):
+        blocker_started = threading.Event()
+        release = threading.Event()
+
+        def transcribing(payload, cancel_event, pause_event, report_progress):
+            if payload == "blocker":
+                blocker_started.set()
+                release.wait(timeout=5)
+            else:
+                ran.append(payload)
+
+        orch = Orchestrator(download_fn=lambda p, c, pe, rp: None, transcribe_fn=transcribing,
+                            on_job_terminal=terminal)
+        blocker = orch.enqueue_transcription("blocker")
+        self.assertTrue(blocker_started.wait(timeout=2))
+        return orch, blocker, release
+
+    def test_a_queued_job_becomes_cancelled_immediately_and_never_runs(self):
+        ran = []
+        orch, _blocker, release = self._busy_orchestrator(ran)
+        queued = orch.enqueue_transcription("queued")
+        self.assertEqual(orch.get_job(queued).state, JobState.PENDING)
+
+        orch.cancel(queued)
+        self.assertEqual(orch.get_job(queued).state, JobState.CANCELLED)   # 前一個還在跑,就已經取消了
+
+        release.set()
+        orch.wait_idle()
+        self.assertEqual(ran, [])
+        self.assertEqual(orch.get_job(queued).state, JobState.CANCELLED)
+        orch.shutdown()
+
+    def test_the_other_queued_jobs_still_run_and_the_terminal_callback_fires_once_per_job(self):
+        ran, finished = [], []
+        orch, _blocker, release = self._busy_orchestrator(ran, terminal=lambda j: finished.append(j.id))
+        cancelled = orch.enqueue_transcription("cancelled")
+        kept = orch.enqueue_transcription("kept")
+        orch.cancel(cancelled)
+        release.set()
+        orch.wait_idle()
+        self.assertEqual(ran, ["kept"])
+        self.assertEqual(orch.get_job(kept).state, JobState.DONE)
+        self.assertEqual(finished.count(cancelled), 1)
+        orch.shutdown()
+
+
 class OrchestratorProgressTest(unittest.TestCase):
     def test_report_progress_updates_job_progress_and_message_while_running(self):
         reached_50 = threading.Event()

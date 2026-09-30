@@ -195,10 +195,33 @@ function renderJobs(jobs) {
       if (box.checked) selectedJobIds.add(box.dataset.select);
       else selectedJobIds.delete(box.dataset.select);
       document.getElementById("cancel-selected-btn").disabled = selectedJobIds.size === 0;
+      syncSelectAll();
     });
   });
   document.getElementById("cancel-selected-btn").disabled = selectedJobIds.size === 0;
+  syncSelectAll();
 }
+
+// 標題列的全選框:只管畫面上有勾選框(排隊中/執行中)的列;全部都勾了才算「全選」,
+// 沒有任何可勾的列時停用
+function syncSelectAll() {
+  const boxes = document.querySelectorAll("#jobs-table tbody [data-select]");
+  const checked = Array.from(boxes).filter((b) => b.checked).length;
+  const all = document.getElementById("select-all");
+  all.disabled = boxes.length === 0;
+  all.checked = boxes.length > 0 && checked === boxes.length;
+  all.indeterminate = checked > 0 && checked < boxes.length;
+}
+
+document.getElementById("select-all").addEventListener("change", (e) => {
+  document.querySelectorAll("#jobs-table tbody [data-select]").forEach((box) => {
+    box.checked = e.target.checked;
+    if (e.target.checked) selectedJobIds.add(box.dataset.select);
+    else selectedJobIds.delete(box.dataset.select);
+  });
+  document.getElementById("cancel-selected-btn").disabled = selectedJobIds.size === 0;
+  syncSelectAll();
+});
 
 async function cancelSelected() {
   const ids = [...selectedJobIds];
