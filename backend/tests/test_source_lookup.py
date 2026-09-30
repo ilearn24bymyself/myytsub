@@ -6,44 +6,82 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import source_lookup  # noqa: E402
 
+# 使用者實測的真實檔名(yt-dlp 存檔時把標題的 "/" 換成 "⧸"、"|" 換成 "｜")
+REAL_STEM = "【NFE】NFE天機指標復盤！7⧸25盈利3R ｜ 比特幣BTC日內交易完整教學"
+REAL_TITLE = "【NFE】NFE天機指標復盤！7/25盈利3R | 比特幣BTC日內交易完整教學"
+NEXT_EPISODE_TITLE = "【NFE】NFE天機指標復盤！7/27盈利24R | 比特幣BTC日內交易完整教學"
+
+
+def _cand(video_id, title):
+    return {"video_id": video_id, "title": title, "channel": "某頻道",
+            "url": f"https://www.youtube.com/watch?v={video_id}"}
+
 
 class GuessMetadataTest(unittest.TestCase):
-    """使用者實測發現的情境:下載中途被 YouTube 限流,yt-dlp 當下沒拿到
-    metadata,之後轉錄只能顯示「本機上傳」。這個函式用檔名反查 YouTube,
-    但只有反查到的 video_id 真的出現在 download_archive.txt(下載當時
-    確實記錄過)才採信,避免比對錯誤把不相關的影片當成出處寫進逐字稿——
-    這條護欄是使用者實測回填舊資料時踩到教訓後加的(比對到但不在
-    archive 裡的那支,真的是錯誤比對)。"""
+    """手動挑本機檔案轉錄、又查不到下載記錄時,用檔名反查 YouTube 補回出處。
+    採信條件:候選影片的標題,套用跟存檔時一樣的換字規則後,要跟檔名「完全相同」。
+    錯誤比對比「不知道出處」更糟,所以寧可放棄也不猜。"""
 
-    def test_returns_none_when_search_finds_nothing(self):
-        with mock.patch.object(source_lookup, "_flat_search", return_value=None), \
-             mock.patch.object(source_lookup, "_load_archive_ids", return_value=set()):
-            self.assertIsNone(source_lookup.guess_metadata("C:/fake/video.mp4"))
-
-    def test_returns_none_when_matched_id_not_in_archive(self):
-        candidate = {"video_id": "notindexed", "title": "某影片", "channel": "某頻道", "url": "https://x"}
-        with mock.patch.object(source_lookup, "_flat_search", return_value=candidate), \
-             mock.patch.object(source_lookup, "_load_archive_ids", return_value={"other-id"}):
-            self.assertIsNone(source_lookup.guess_metadata("C:/fake/video.mp4"))
-
-    def test_returns_metadata_and_persists_it_when_id_confirmed_in_archive(self):
-        candidate = {"video_id": "abc123", "title": "某影片", "channel": "某頻道",
-                     "url": "https://youtube.com/watch?v=abc123"}
-        with mock.patch.object(source_lookup, "_flat_search", return_value=candidate), \
-             mock.patch.object(source_lookup, "_load_archive_ids", return_value={"abc123"}), \
+    def _guess(self, candidates, archive=(), stem=REAL_STEM):
+        with mock.patch.object(source_lookup, "_search_candidates", return_value=candidates) as fake_search, \
+             mock.patch.object(source_lookup, "_load_archive_ids", return_value=set(archive)), \
              mock.patch.object(source_lookup, "download_record") as fake_record:
-            result = source_lookup.guess_metadata("C:/fake/video.mp4")
+            result = source_lookup.guess_metadata(f"C:/fake/{stem}.mp4")
+        return result, fake_search, fake_record
 
-        self.assertEqual(result["url"], "https://youtube.com/watch?v=abc123")
-        # video_id 不傳給 save():download_record 的存檔格式本來就不留這個欄位
+    def test_finds_the_users_real_file_whose_title_contained_a_slash(self):
+        # 使用者實測:檔名裡的 "⧸" 讓原本的搜尋回傳 0 筆,所以顯示「無法取得來源」
+        result, fake_search, fake_record = self._guess([_cand("FfN6As_5doQ", REAL_TITLE)])
+        self.assertEqual(result["url"], "https://www.youtube.com/watch?v=FfN6As_5doQ")
+        queried = fake_search.call_args.args[0]
+        self.assertNotIn("⧸", queried)   # 搜尋字串要把存檔時換掉的字換回來
         fake_record.save.assert_called_once_with([{
-            "path": "C:/fake/video.mp4", "title": "某影片", "channel": "某頻道",
-            "url": "https://youtube.com/watch?v=abc123", "upload_date": None,
+            "path": f"C:/fake/{REAL_STEM}.mp4", "title": REAL_TITLE, "channel": "某頻道",
+            "url": "https://www.youtube.com/watch?v=FfN6As_5doQ", "upload_date": None,
         }])
 
+    def test_rejects_a_different_episode_even_if_it_is_in_the_archive(self):
+        # 整個系列都下載過時,搜到相鄰的另一集也會「在 archive 裡」——不能因此採信
+        result, _search, fake_record = self._guess([_cand("other", NEXT_EPISODE_TITLE)], archive={"other"})
+        self.assertIsNone(result)
+        fake_record.save.assert_not_called()
+
+    def test_accepts_an_exact_title_match_even_if_not_in_the_archive(self):
+        # 用別的工具下載的檔案不在本工具的 archive 裡;標題完全相同已經足以確認
+        result, _search, _record = self._guess([_cand("FfN6As_5doQ", REAL_TITLE)], archive=set())
+        self.assertIsNotNone(result)
+
+    def test_picks_the_exact_match_among_several_results(self):
+        result, _search, _record = self._guess(
+            [_cand("other", NEXT_EPISODE_TITLE), _cand("FfN6As_5doQ", REAL_TITLE)])
+        self.assertEqual(result["url"], "https://www.youtube.com/watch?v=FfN6As_5doQ")
+
+    def test_several_exact_matches_prefers_the_one_in_the_archive(self):
+        result, _search, _record = self._guess(
+            [_cand("reupload", REAL_TITLE), _cand("FfN6As_5doQ", REAL_TITLE)], archive={"FfN6As_5doQ"})
+        self.assertEqual(result["url"], "https://www.youtube.com/watch?v=FfN6As_5doQ")
+
+    def test_several_exact_matches_none_in_archive_gives_up_instead_of_guessing(self):
+        result, _search, fake_record = self._guess(
+            [_cand("a", REAL_TITLE), _cand("b", REAL_TITLE)], archive=set())
+        self.assertIsNone(result)
+        fake_record.save.assert_not_called()
+
+    def test_returns_none_when_search_finds_nothing(self):
+        result, _search, _record = self._guess([])
+        self.assertIsNone(result)
+
     def test_search_failure_returns_none_instead_of_raising(self):
-        with mock.patch.object(source_lookup, "_flat_search", side_effect=Exception("network down")):
-            self.assertIsNone(source_lookup.guess_metadata("C:/fake/video.mp4"))
+        with mock.patch.object(source_lookup, "_search_candidates", side_effect=Exception("network down")):
+            self.assertIsNone(source_lookup.guess_metadata(f"C:/fake/{REAL_STEM}.mp4"))
+
+
+class SearchQueryTest(unittest.TestCase):
+    def test_restores_characters_that_were_replaced_when_saving(self):
+        self.assertEqual(source_lookup._search_query("A⧸B⧹C"), "A/B\\C")
+
+    def test_leaves_an_ordinary_title_unchanged(self):
+        self.assertEqual(source_lookup._search_query("普通標題 ｜ 123"), "普通標題 ｜ 123")
 
 
 if __name__ == "__main__":

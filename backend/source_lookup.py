@@ -1,17 +1,34 @@
 """找不到 metadata 時(下載當下被限流、或本機挑選了本工具沒查到記錄的
 檔案),用檔名反查 YouTube,盡量補回出處。
 
-只有反查到的 video_id 真的出現在 download_archive.txt(下載當時確實
-記錄過)才採信——這是回填舊資料時踩過的教訓:單靠標題文字搜尋比對,
-偶爾會比對到完全不相關的影片,錯誤比對比「不知道出處」更糟。
+採信條件:候選影片的標題,套用跟存檔時一樣的換字規則(yt_dlp 的
+sanitize_filename)後,必須跟檔名「完全相同」。錯誤比對比「不知道出處」更糟,
+所以寧可放棄也不猜。
+
+早期版本改用「video_id 在 download_archive.txt 裡」當判斷,使用者實測後發現
+不可靠:整個系列都下載過時,搜到相鄰的另一集也會在 archive 裡。archive 現在
+只用來在「好幾支影片同名」時挑出本工具下載過的那一支。
 """
 import os
 from pathlib import Path
 
 import yt_dlp
+from yt_dlp.utils import sanitize_filename
 
 import download_record
 from downloader import ARCHIVE_FILE
+
+# 存檔時 yt-dlp 會把檔名不能用的字換成長得很像的字(例如 "/" -> "⧸")。拿檔名去搜尋
+# 要換回來,否則搜不到——使用者實測的「7⧸25盈利3R」原樣搜尋回傳 0 筆。
+# 只換這兩個:它們幾乎不會出現在正常標題裡;"｜"、"："這類全形字本來就常見於中文標題
+_UNSANITIZE = {"⧸": "/", "⧹": "\\"}
+_SEARCH_RESULTS = 5
+
+
+def _search_query(stem: str) -> str:
+    for replaced, original in _UNSANITIZE.items():
+        stem = stem.replace(replaced, original)
+    return stem
 
 
 def _load_archive_ids() -> set:
@@ -25,34 +42,43 @@ def _load_archive_ids() -> set:
     return ids
 
 
-def _flat_search(title: str) -> dict | None:
+def _search_candidates(query: str) -> list:
     """輕量搜尋(只掃搜尋結果列表,不深入抓取每支影片的完整頁面),
     避免觸發 YouTube 的 bot 偵測。"""
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": "in_playlist"}
     with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(f"ytsearch1:{title}", download=False)
-    entries = info.get("entries") or []
-    if not entries:
+        info = ydl.extract_info(f"ytsearch{_SEARCH_RESULTS}:{query}", download=False)
+    candidates = []
+    for e in info.get("entries") or []:
+        vid = e.get("id")
+        candidates.append({
+            "video_id": vid,
+            "title": e.get("title"),
+            "channel": e.get("channel") or e.get("uploader"),
+            "url": e.get("url") or f"https://www.youtube.com/watch?v={vid}",
+        })
+    return candidates
+
+
+def _pick_exact_match(stem: str, candidates: list):
+    exact = [c for c in candidates if c.get("title") and sanitize_filename(c["title"]) == stem]
+    if len({c["video_id"] for c in exact}) == 1:
+        return exact[0]
+    if not exact:
         return None
-    e = entries[0]
-    vid = e.get("id")
-    return {
-        "video_id": vid,
-        "title": e.get("title"),
-        "channel": e.get("channel") or e.get("uploader"),
-        "url": e.get("url") or f"https://www.youtube.com/watch?v={vid}",
-    }
+    # 好幾支不同影片同名(例如重新上傳):只有其中一支是本工具下載過的才採信
+    archive = _load_archive_ids()
+    in_archive = [c for c in exact if c["video_id"] in archive]
+    return in_archive[0] if len({c["video_id"] for c in in_archive}) == 1 else None
 
 
 def guess_metadata(path: str) -> dict | None:
-    title = Path(path).stem
+    stem = Path(path).stem
     try:
-        candidate = _flat_search(title)
+        candidate = _pick_exact_match(stem, _search_candidates(_search_query(stem)))
     except Exception:
         return None
     if not candidate:
-        return None
-    if candidate["video_id"] not in _load_archive_ids():
         return None
 
     metadata = {
