@@ -80,6 +80,14 @@ class SearchQueryTest(unittest.TestCase):
     def test_restores_characters_that_were_replaced_when_saving(self):
         self.assertEqual(source_lookup._search_query("A⧸B⧹C"), "A/B\\C")
 
+    def test_a_word_starting_with_minus_is_not_sent_as_an_exclusion(self):
+        # YouTube 搜尋把「空白後的 -字」當成「排除這個字」:使用者實測的「ETH -3R」
+        # 等於叫它找不含 3R 的結果,永遠 0 筆
+        q = source_lookup._search_query("市場級別分離 ｜ 8⧸23-24 ETH -3R ｜ 3m單級別")
+        self.assertNotIn(" -", q)
+        self.assertFalse(q.startswith("-"))
+        self.assertIn("8/23-24", q)   # 字中間的 - 不是排除語法,要保留
+
     def test_leaves_an_ordinary_title_unchanged(self):
         self.assertEqual(source_lookup._search_query("普通標題 ｜ 123"), "普通標題 ｜ 123")
 

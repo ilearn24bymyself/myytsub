@@ -10,6 +10,7 @@ sanitize_filename)後,必須跟檔名「完全相同」。錯誤比對比「不�
 只用來在「好幾支影片同名」時挑出本工具下載過的那一支。
 """
 import os
+import re
 from pathlib import Path
 
 import yt_dlp
@@ -28,7 +29,9 @@ _SEARCH_RESULTS = 5
 def _search_query(stem: str) -> str:
     for replaced, original in _UNSANITIZE.items():
         stem = stem.replace(replaced, original)
-    return stem
+    # YouTube 搜尋把「開頭或空白後的 -字」當成「排除這個字」。使用者實測的「ETH -3R」
+    # 等於叫它找不含 3R 的結果,永遠 0 筆。只影響搜尋字串,比對仍然用完整標題
+    return re.sub(r"(^|\s)-+(?=\S)", r"\1", stem)
 
 
 def _load_archive_ids() -> set:
