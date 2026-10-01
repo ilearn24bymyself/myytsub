@@ -12,6 +12,8 @@ function currentOptions() {
     format_type: document.getElementById("format-type").value,
     want_srt: document.getElementById("want-srt").checked,
     skip_existing: document.getElementById("skip-existing").checked,
+    skip_transcribed: document.getElementById("skip-transcribed").checked,
+    download_only: document.getElementById("download-only").checked,
   };
 }
 
@@ -19,6 +21,7 @@ function describeOpts(opts) {
   const parts = [opts.format_type === "video" ? "影片" : "音訊"];
   if (opts.want_srt) parts.push("含字幕");
   if (opts.skip_existing) parts.push("已存在則跳過");
+  if (opts.download_only) parts.push("只下載不轉錄");
   return parts.join("、");
 }
 

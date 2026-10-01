@@ -300,6 +300,48 @@ def fetch_metadata(url: str) -> dict | None:
             "url": meta["url"] or url, "upload_date": meta["upload_date"]}
 
 
+def _flatten_entries(info: dict) -> list:
+    """頻道頁可能有一層一層的播放清單(例如「影片」「Shorts」分頁),攤平成影片清單。"""
+    flat = []
+    for entry in info.get("entries") or []:
+        if not entry:
+            continue
+        if entry.get("entries") is not None or entry.get("_type") == "playlist":
+            flat.extend(_flatten_entries(entry))
+        else:
+            flat.append(entry)
+    return flat
+
+
+def list_entries(url: str) -> list | None:
+    """只列清單、不下載:每支影片回傳 {url, title, video_id, channel, upload_date}。
+    下載前靠這份清單判斷哪些已有逐字稿、哪些下載過。單支影片網址就是只有一項。
+    讀不到清單就回傳 None(呼叫端退回「整個網址一次下載」的老做法);
+    被限流則丟 RateLimited,讓工作進入待重試。"""
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": "in_playlist"}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        if is_rate_limited_error(str(e)):
+            raise RateLimited(str(e)) from e
+        return None
+    if not info:
+        return None
+    entries = _flatten_entries(info) if "entries" in info else [info]
+    result = []
+    for e in entries:
+        video_url = e.get("webpage_url") or e.get("url") or (url if e is info else None)
+        if not video_url:
+            continue
+        result.append({
+            "url": video_url, "title": e.get("title"), "video_id": e.get("id"),
+            "channel": e.get("channel") or e.get("uploader"),
+            "upload_date": _format_upload_date(e.get("upload_date")),
+        })
+    return result
+
+
 def fetch_title_only(url: str) -> str | None:
     """只要標題,不下載、不受 download_archive 影響(archive 只在下載階段生效)。
     用途:影片已經被 archive 記錄過,download_media() 拿不到任何 info 時

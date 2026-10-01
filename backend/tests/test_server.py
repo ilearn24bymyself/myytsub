@@ -7,6 +7,26 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server  # noqa: E402
+import ledger  # noqa: E402
+
+_module_patches = []
+_module_tmp = None
+
+
+def setUpModule():
+    global _module_tmp
+    import tempfile
+    _module_tmp = tempfile.TemporaryDirectory()
+    for p in (mock.patch.object(server, "list_entries", return_value=None),   # None = 讀不到清單,走「整個網址一次下載」
+              mock.patch.object(server, "BASE_DIR", Path(_module_tmp.name))):
+        p.start()
+        _module_patches.append(p)
+
+
+def tearDownModule():
+    for p in _module_patches:
+        p.stop()
+    _module_tmp.cleanup()
 
 
 class DownloadChainsToTranscriptionTest(unittest.TestCase):
@@ -31,7 +51,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
             download_fn = server.make_real_download_fn(fake_orchestrator)
             payload = {"url": "https://youtube.com/watch?v=x", "format_type": "video",
                        "want_srt": False, "skip_existing": False}
-            download_fn(payload, mock.Mock(), mock.Mock(), mock.Mock())
+            download_fn(payload, _not_cancelled(), mock.Mock(), mock.Mock())
 
         fake_orchestrator.enqueue_transcription.assert_has_calls([
             mock.call({"path": "C:/fake/20260924/downloads/影片一.mp4", "want_srt": False, "skip_existing": False,
@@ -58,7 +78,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
             download_fn = server.make_real_download_fn(fake_orchestrator)
             payload = {"url": "https://www.youtube.com/watch?v=pfGg0Uris1w", "format_type": "video",
                        "want_srt": True, "skip_existing": True}
-            download_fn(payload, mock.Mock(), mock.Mock(), fake_report_progress)
+            download_fn(payload, _not_cancelled(), mock.Mock(), fake_report_progress)
 
         fake_record.find_path_by_video_id.assert_called_once_with("pfGg0Uris1w")
         message = fake_report_progress.call_args.args[1]
@@ -77,7 +97,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
             download_fn = server.make_real_download_fn(fake_orchestrator)
             payload = {"url": "https://www.youtube.com/watch?v=pfGg0Uris1w", "format_type": "video",
                        "want_srt": True, "skip_existing": True}
-            download_fn(payload, mock.Mock(), mock.Mock(), fake_report_progress)
+            download_fn(payload, _not_cancelled(), mock.Mock(), fake_report_progress)
 
         message = fake_report_progress.call_args.args[1]
         self.assertIn("C:/fake/20260918/downloads/舊影片標題.mp4", message)
@@ -97,7 +117,7 @@ class DownloadChainsToTranscriptionTest(unittest.TestCase):
             download_fn = server.make_real_download_fn(fake_orchestrator)
             payload = {"url": "https://youtube.com/watch?v=x", "format_type": "video",
                        "want_srt": True, "skip_existing": True}
-            download_fn(payload, mock.Mock(), mock.Mock(), fake_report_progress)
+            download_fn(payload, _not_cancelled(), mock.Mock(), fake_report_progress)
 
         fake_orchestrator.enqueue_transcription.assert_not_called()
         fake_record.save.assert_not_called()
@@ -128,7 +148,7 @@ class RateLimitMidDownloadKeepsFinishedItemsTest(unittest.TestCase):
             try:
                 server.make_real_download_fn(fake_orchestrator)(
                     {"url": "https://www.youtube.com/@channel", "want_srt": True, "skip_existing": True},
-                    mock.Mock(), mock.Mock(), mock.Mock())
+                    _not_cancelled(), mock.Mock(), mock.Mock())
             except Exception as e:  # noqa: BLE001 - 測試要檢查丟出來的是什麼
                 error = e
         queued = [c.args[0]["path"] for c in fake_orchestrator.enqueue_transcription.call_args_list]
@@ -422,6 +442,116 @@ class TranscriptionSourceOrderTest(unittest.TestCase):
         fake_sidecar.write.assert_called_once_with("C:/fake/video.mp4", self.META)
 
 
+def _not_cancelled():
+    flag = mock.Mock()
+    flag.is_set.return_value = False
+    return flag
+
+
+def _listed(name, vid, channel="頻道"):
+    return {"url": f"https://www.youtube.com/watch?v={vid}", "title": name, "video_id": vid,
+            "channel": channel, "upload_date": None}
+
+
+class ListedDownloadDecisionsTest(unittest.TestCase):
+    """下載前先列清單、逐支判斷:已有逐字稿的不下載、已下載沒轉錄的補排轉錄、
+    只下載不轉錄的不排轉錄。判斷的依據是掃描所有日期資料夾的總清單。"""
+
+    def _run(self, entries, known=None, payload=None, downloaded=None, cancel_after=None):
+        known = known or ledger.Ledger()
+        fake_orchestrator = mock.Mock()
+        report = mock.Mock()
+        cancel = mock.Mock()
+        cancel.is_set.return_value = False
+        calls = []
+
+        def fake_download_media(url, **kwargs):
+            calls.append(url)
+            if cancel_after is not None and len(calls) >= cancel_after:
+                cancel.is_set.return_value = True
+            entry = (downloaded or {}).get(url)
+            if entry:
+                kwargs["on_item_done"](entry)
+                return [entry]
+            return []
+
+        with mock.patch.object(server, "list_entries", return_value=entries), \
+             mock.patch.object(server.ledger, "scan", return_value=known), \
+             mock.patch.object(server.ledger, "write_summary") as fake_summary, \
+             mock.patch.object(server, "download_media", side_effect=fake_download_media), \
+             mock.patch.object(server, "download_record"), \
+             mock.patch.object(server, "source_sidecar") as fake_sidecar, \
+             mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20261001")):
+            server.make_real_download_fn(fake_orchestrator)(
+                dict({"url": "https://www.youtube.com/@ch/videos", "want_srt": True, "skip_existing": True},
+                     **(payload or {})), cancel, mock.Mock(), report)
+        queued = [c.args[0] for c in fake_orchestrator.enqueue_transcription.call_args_list]
+        return calls, queued, report, fake_sidecar, fake_summary
+
+    def _known(self, transcripts=(), downloads=()):
+        k = ledger.Ledger()
+        for stem in transcripts:
+            k.transcripts[stem] = ["20260924"]
+        for stem, path in downloads:
+            k.downloads[stem] = [("20260924", path)]
+        return k
+
+    def test_a_video_that_already_has_a_transcript_is_not_downloaded(self):
+        a, b = _listed("有逐字稿", "aaaaaaaaaaa"), _listed("全新的", "bbbbbbbbbbb")
+        new = {"path": "C:/fake/20261001/downloads/全新的.mp4", **{k: b[k] for k in ("title", "channel", "upload_date")},
+               "url": b["url"], "video_id": "bbbbbbbbbbb"}
+        calls, queued, _r, _s, _f = self._run([a, b], known=self._known(transcripts=["有逐字稿"]),
+                                              downloaded={b["url"]: new})
+        self.assertEqual(calls, [b["url"]])
+        self.assertEqual([q["path"] for q in queued], [new["path"]])
+
+    def test_the_transcript_check_can_be_turned_off(self):
+        a = _listed("有逐字稿", "aaaaaaaaaaa")
+        calls, _q, _r, _s, _f = self._run([a], known=self._known(transcripts=["有逐字稿"]),
+                                          payload={"skip_transcribed": False})
+        self.assertEqual(calls, [a["url"]])
+
+    def test_an_already_downloaded_video_without_a_transcript_gets_its_transcription_queued(self):
+        a = _listed("下載過沒轉錄", "aaaaaaaaaaa")
+        old = "C:/fake/20260924/downloads/下載過沒轉錄.mp4"
+        calls, queued, _r, _s, _f = self._run([a], known=self._known(downloads=[("下載過沒轉錄", old)]))
+        self.assertEqual(calls, [])                      # 不重新下載
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0]["path"], old)
+        self.assertEqual(queued[0]["metadata"]["url"], a["url"])
+        self.assertEqual(queued[0]["metadata"]["title"], "下載過沒轉錄")
+        self.assertTrue(queued[0]["want_srt"])
+
+    def test_download_only_never_queues_a_transcription(self):
+        a, b = _listed("下載過沒轉錄", "aaaaaaaaaaa"), _listed("全新的", "bbbbbbbbbbb")
+        new = {"path": "C:/fake/20261001/downloads/全新的.mp4", "title": "全新的", "channel": "頻道",
+               "url": b["url"], "upload_date": None, "video_id": "bbbbbbbbbbb"}
+        calls, queued, _r, fake_sidecar, _f = self._run(
+            [a, b], known=self._known(downloads=[("下載過沒轉錄", "C:/fake/20260924/downloads/下載過沒轉錄.mp4")]),
+            payload={"download_only": True}, downloaded={b["url"]: new})
+        self.assertEqual(calls, [b["url"]])
+        self.assertEqual(queued, [])
+        fake_sidecar.write.assert_called_once_with(new["path"], new)   # 影片旁的資訊檔照寫
+
+    def test_nothing_new_to_download_says_so_instead_of_pretending(self):
+        a = _listed("有逐字稿", "aaaaaaaaaaa")
+        _c, _q, report, _s, _f = self._run([a], known=self._known(transcripts=["有逐字稿"]))
+        message = report.call_args.args[1]
+        self.assertIn("略過 1 支", message)
+
+    def test_cancelling_stops_before_the_next_video(self):
+        a, b = _listed("甲", "aaaaaaaaaaa"), _listed("乙", "bbbbbbbbbbb")
+        calls, _q, _r, _s, _f = self._run([a, b], cancel_after=1)
+        self.assertEqual(calls, [a["url"]])
+
+    def test_the_summary_file_is_refreshed_when_a_video_finishes(self):
+        a = _listed("全新的", "aaaaaaaaaaa")
+        new = {"path": "C:/fake/20261001/downloads/全新的.mp4", "title": "全新的", "channel": "頻道",
+               "url": a["url"], "upload_date": None, "video_id": "aaaaaaaaaaa"}
+        _c, _q, _r, _s, fake_summary = self._run([a], downloaded={a["url"]: new})
+        self.assertTrue(fake_summary.called)
+
+
 class PauseResumeHttpRoutesTest(unittest.TestCase):
     """/api/jobs/<id>/pause、/resume 只有 orchestrator 層的邏輯測試,HTTP 路由本身沒測過
     (code review 抓到的小缺口)。這裡只測「路由有沒有把 id 正確解析出來、呼叫到
@@ -447,6 +577,36 @@ class PauseResumeHttpRoutesTest(unittest.TestCase):
             srv.server_close()  # 釋放監聽中的 socket,避免測試留下 ResourceWarning
 
 
+class DownloadRouteOptionsTest(unittest.TestCase):
+    """畫面上的「只下載不轉錄」「略過已有逐字稿的影片」要真的傳到下載工作裡。"""
+
+    def _post(self, body):
+        import json
+        from http.server import ThreadingHTTPServer
+        fake_orchestrator = mock.Mock()
+        fake_orchestrator.enqueue_download.return_value = "1"
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(fake_orchestrator))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/api/jobs/download",
+                                         data=json.dumps(body).encode("utf-8"), method="POST")
+            urllib.request.urlopen(req)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        return fake_orchestrator.enqueue_download.call_args.args[0]
+
+    def test_the_two_options_are_passed_through(self):
+        payload = self._post({"url": "https://youtube.com/@x", "download_only": True, "skip_transcribed": False})
+        self.assertIs(payload["download_only"], True)
+        self.assertIs(payload["skip_transcribed"], False)
+
+    def test_defaults_are_download_and_transcribe_and_skip_videos_with_a_transcript(self):
+        payload = self._post({"url": "https://youtube.com/@x"})
+        self.assertIs(payload["download_only"], False)
+        self.assertIs(payload["skip_transcribed"], True)
+
+
 class FinalStatusMessagesTest(unittest.TestCase):
     """使用者實測畫面:工作「完成」了,狀態底下卻還寫「下載中」「轉錄中」。
     結束時要明確留下「做完了」這句話(final=True),orchestrator 才會用它取代進度文字。"""
@@ -457,7 +617,7 @@ class FinalStatusMessagesTest(unittest.TestCase):
              mock.patch.object(server, "download_record"), \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20260929")):
             download_fn = server.make_real_download_fn(mock.Mock())
-            download_fn({"url": "https://youtube.com/watch?v=x"}, mock.Mock(), mock.Mock(), report)
+            download_fn({"url": "https://youtube.com/watch?v=x"}, _not_cancelled(), mock.Mock(), report)
         report.assert_any_call(100.0, "下載完成", final=True)
 
     def test_completed_transcription_leaves_a_final_done_message(self):
@@ -502,6 +662,25 @@ class FinalStatusMessagesTest(unittest.TestCase):
                 transcribe_fn({"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": True},
                               mock.Mock(), mock.Mock(), report)
         report.assert_any_call(100.0, "已有逐字稿,跳過", final=True)
+
+
+    def test_a_transcript_made_on_another_day_also_counts_as_existing(self):
+        # 逐字稿在別天的資料夾(例如重開機跨日),轉錄前也要認得,不重做
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "20260924" / "transcripts").mkdir(parents=True)
+            (base / "20260924" / "transcripts" / "video.txt").write_text("昨天做過", encoding="utf-8")
+            today = base / "20261001"
+            (today / "transcripts").mkdir(parents=True)
+            report = mock.Mock()
+            fake_transcriber = mock.Mock()
+            with mock.patch.object(server, "Transcriber", return_value=fake_transcriber),                  mock.patch.object(server, "BASE_DIR", base),                  mock.patch.object(server, "today_dir", return_value=today):
+                server.make_real_transcribe_fn()(
+                    {"path": "C:/fake/video.mp4", "want_srt": False, "skip_existing": True},
+                    mock.Mock(), mock.Mock(), report)
+        report.assert_any_call(100.0, "已有逐字稿,跳過", final=True)
+        fake_transcriber.transcribe.assert_not_called()
 
 
 class JobJsonTest(unittest.TestCase):

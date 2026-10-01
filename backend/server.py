@@ -21,11 +21,12 @@ STATIC_DIR = BASE_DIR / "electron" / "renderer"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from orchestrator import Orchestrator, JobState, JobType  # noqa: E402
 from batch_completion import BatchCompletion  # noqa: E402
-from downloader import download_media, extract_video_id, fetch_metadata, fetch_title_only  # noqa: E402
+from downloader import download_media, extract_video_id, fetch_metadata, fetch_title_only, list_entries  # noqa: E402
 from yt_dlp.utils import sanitize_filename  # noqa: E402
 from transcriber import Transcriber  # noqa: E402
 from index_builder import build_day_index  # noqa: E402
 import download_record  # noqa: E402
+import ledger  # noqa: E402
 import source_lookup  # noqa: E402
 import source_sidecar  # noqa: E402
 
@@ -82,14 +83,35 @@ def make_real_download_fn(orchestrator):
     項目要有轉錄工作接手,index 才有東西可以反映(票 03)。
     metadata 隨 payload 一起轉給轉錄工作(自動接鏈當下就有,不用等查記錄檔),
     同時也存一份到 download_record,這樣使用者之後手動挑同一份檔案轉錄
-    (例如下載中斷分好幾次、或只是想重新產生逐字稿)也查得回出處。"""
+    (例如下載中斷分好幾次、或只是想重新產生逐字稿)也查得回出處。
+
+    下載前先只列清單(頻道/播放清單可能幾百支),逐支對照「總清單」(掃描所有日期資料夾):
+    已有逐字稿的略過(可關)、已下載但沒轉錄的直接補排轉錄、全新的才真的下載。
+    payload 的 download_only=True 代表只下載不轉錄。"""
     def _download(payload, cancel_event, pause_event, report_progress):
         d = today_dir()
         handled = set()
         handled_ids = set()
+        download_only = bool(payload.get("download_only", False))
 
         def _progress(percent):
             report_progress(percent, "下載中")
+
+        def _refresh_summary():
+            try:
+                ledger.write_summary(BASE_DIR)
+            except Exception:
+                traceback.print_exc()  # 總清單寫不出來不能擋住下載
+
+        def _queue_transcription(path, metadata):
+            if download_only:
+                return
+            orchestrator.enqueue_transcription({
+                "path": path,
+                "want_srt": payload.get("want_srt", True),
+                "skip_existing": payload.get("skip_existing", True),
+                "metadata": metadata,
+            })
 
         def _handle(entry):
             # 每一支完成當下就處理:寫影片旁資訊檔、存記錄、排轉錄。一個網址裡後面的影片
@@ -106,32 +128,58 @@ def make_real_download_fn(orchestrator):
             except Exception:
                 traceback.print_exc()  # 資訊檔寫不了不能擋住轉錄
             download_record.save([entry])
-            orchestrator.enqueue_transcription({
-                "path": entry["path"],
-                "want_srt": payload.get("want_srt", True),
-                "skip_existing": payload.get("skip_existing", True),
-                "metadata": entry,
-            })
+            _queue_transcription(entry["path"], entry)
+            _refresh_summary()
 
-        downloaded = download_media(
-            payload["url"], output_dir=str(d / "downloads"),
-            format_type=payload.get("format_type", "audio"),
-            progress_callback=_progress, stop_event=cancel_event,
-            on_item_done=_handle,
-        )
-        # 檔案鎖定重試救回來的檔案不會經過即時回報,這裡補處理(已處理過的會跳過)
-        for entry in downloaded:
-            _handle(entry)
+        entries = list_entries(payload["url"])
+        if entries is None:
+            # 讀不到清單:退回老做法,整個網址交給 yt-dlp 一次處理(沒有標題可以預先判斷)
+            entries = [{"url": payload["url"], "title": None, "video_id": None, "channel": None, "upload_date": None}]
+        known = ledger.scan(BASE_DIR)
+        skip_transcribed = payload.get("skip_transcribed", True)
+        skipped = 0
+
+        for item in entries:
+            if cancel_event.is_set():
+                return
+            stem = sanitize_filename(item["title"]) if item.get("title") else None
+            has_transcript = bool(stem) and known.has_transcript(stem)
+            existing_path = known.downloaded_path(stem) if stem else None
+            if has_transcript and skip_transcribed:
+                skipped += 1
+                continue
+            if existing_path:
+                skipped += 1
+                if not has_transcript:
+                    # 下載過、卻沒有逐字稿(例如中途重開機、轉錄佇列沒了):補排轉錄
+                    _queue_transcription(existing_path, {
+                        "path": existing_path, "title": item["title"], "channel": item.get("channel"),
+                        "url": item["url"], "upload_date": item.get("upload_date"),
+                        "video_id": item.get("video_id")})
+                continue
+            downloaded = download_media(
+                item["url"], output_dir=str(d / "downloads"),
+                format_type=payload.get("format_type", "audio"),
+                progress_callback=_progress, stop_event=cancel_event,
+                on_item_done=_handle,
+            )
+            # 檔案鎖定重試救回來的檔案不會經過即時回報,這裡補處理(已處理過的會跳過)
+            for entry in downloaded:
+                _handle(entry)
+
         if not handled:
-            # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
-            # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
-            # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因,並且
-            # 盡量把之前下載到哪裡也一併告訴使用者。
-            found_path = _find_previously_downloaded_path(payload["url"])
-            if found_path:
-                report_progress(100.0, f"已下載過,略過 → {found_path}", final=True)
+            if len(entries) == 1 and skipped == 0:
+                # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
+                # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
+                # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因,並且
+                # 盡量把之前下載到哪裡也一併告訴使用者。
+                found_path = _find_previously_downloaded_path(entries[0]["url"])
+                if found_path:
+                    report_progress(100.0, f"已下載過,略過 → {found_path}", final=True)
+                else:
+                    report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)", final=True)
             else:
-                report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)", final=True)
+                report_progress(100.0, f"沒有新影片需要下載(略過 {skipped} 支:已下載過或已有逐字稿)", final=True)
             return
         report_progress(100.0, "下載完成", final=True)
     return _download
@@ -193,7 +241,7 @@ def make_real_transcribe_fn():
         stem = Path(path).stem
         txt_path = today_dir() / "transcripts" / f"{stem}.txt"
 
-        if payload.get("skip_existing", True) and txt_path.is_file():
+        if payload.get("skip_existing", True) and (txt_path.is_file() or ledger.has_transcript_anywhere(BASE_DIR, stem)):
             report_progress(100.0, "已有逐字稿,跳過", final=True)
             return
 
@@ -317,6 +365,8 @@ def make_handler(orchestrator):
                     "format_type": body.get("format_type", "audio"),
                     "want_srt": body.get("want_srt", True),
                     "skip_existing": body.get("skip_existing", True),
+                    "download_only": bool(body.get("download_only", False)),
+                    "skip_transcribed": bool(body.get("skip_transcribed", True)),
                 })
                 self._send_json(200, {"id": job_id})
             elif path == "/api/jobs/transcribe":
