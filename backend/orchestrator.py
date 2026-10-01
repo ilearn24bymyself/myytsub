@@ -58,7 +58,7 @@ class Job:
 
 
 class Orchestrator:
-    def __init__(self, download_fn, transcribe_fn, on_job_terminal=None):
+    def __init__(self, download_fn, transcribe_fn, on_job_terminal=None, auto_retry_seconds=None):
         """
         download_fn(payload, cancel_event, pause_event, report_progress) /
         transcribe_fn(payload, cancel_event, pause_event, report_progress):
@@ -69,10 +69,16 @@ class Orchestrator:
         on_job_terminal(job):
             每個工作進入終態(done/error/pending-retry/cancelled)時呼叫一次,
             用來觸發當日 index 增量重建。
+        auto_retry_seconds:
+            被限流變成「待重試」的下載,過這麼多秒自動重試一次(再被限流就再等一輪);
+            None = 不自動重試,只有使用者按「重試」才會重試。計時器存在程式裡,程式關掉就沒了。
         """
         self.download_fn = download_fn
         self.transcribe_fn = transcribe_fn
         self.on_job_terminal = on_job_terminal
+        self.auto_retry_seconds = auto_retry_seconds
+        self.auto_retry_at = None  # 下一次自動重試的時間(epoch 秒),沒有排程就是 None;給畫面顯示倒數用
+        self._retry_timer = None
 
         self._lock = threading.Lock()
         self._jobs = {}
@@ -110,13 +116,29 @@ class Orchestrator:
     def retry_pending(self):
         """使用者主動觸發:清除限流旗標,把所有 pending-retry 的下載工作重新排隊。"""
         with self._lock:
+            timer, self._retry_timer = self._retry_timer, None   # 手動重試或計時到了,舊的計時器都作廢
+            self.auto_retry_at = None
             self._rate_limited = False
             to_retry = [j for j in self._jobs.values() if j.type == JobType.DOWNLOAD and j.state == JobState.PENDING_RETRY]
+        if timer is not None:
+            timer.cancel()
         for job in to_retry:
             job.state = JobState.PENDING
             job.message = None  # 排隊中不該還寫著上一輪的限流說明
             job.final_message = None
             self._download_queue.put(job)
+
+    def _schedule_auto_retry(self):
+        if not self.auto_retry_seconds:
+            return
+        with self._lock:
+            if self._retry_timer is not None:
+                return   # 已經排好了,不重複排
+            timer = threading.Timer(self.auto_retry_seconds, self.retry_pending)
+            timer.daemon = True
+            self._retry_timer = timer
+            self.auto_retry_at = time.time() + self.auto_retry_seconds
+            timer.start()
 
     def is_settled(self):
         """沒有任何工作在排隊或執行。待重試不算——它們在等使用者按重試,不是在跑。"""
@@ -144,6 +166,11 @@ class Orchestrator:
             cancel_now = job.state == JobState.PENDING
             if cancel_now:
                 job.state = JobState.CANCELLED
+            elif job.state == JobState.PENDING_RETRY:
+                # 等著重試的:直接放棄,之後自動重試或手動重試都不會再撿起來(已經收過尾,不再通知一次)
+                job.state = JobState.CANCELLED
+                job.message = None
+                job.final_message = None
         if cancel_now:
             self._finish(job, JobState.CANCELLED)
 
@@ -194,6 +221,7 @@ class Orchestrator:
                 # 還在被限流的狀態下:不嘗試,直接標記待重試(逐項嘗試只會讓鎖定拖更久)
                 job.final_message = _MSG_SKIPPED_BY_LIMIT
                 self._finish(job, JobState.PENDING_RETRY)
+                self._schedule_auto_retry()
                 q.task_done()
                 continue
 
@@ -220,6 +248,8 @@ class Orchestrator:
                         self._rate_limited = True
                 job.final_message = _MSG_RATE_LIMITED
                 self._finish(job, JobState.PENDING_RETRY)
+                if is_download_lane:
+                    self._schedule_auto_retry()
             except Exception as e:
                 if job.cancel_event.is_set():
                     # 使用者按了取消:yt-dlp 用丟例外中斷下載,這不是失敗
@@ -239,6 +269,10 @@ class Orchestrator:
         self._transcribe_queue.join()
 
     def shutdown(self):
+        with self._lock:
+            timer, self._retry_timer = self._retry_timer, None
+        if timer is not None:
+            timer.cancel()
         self._download_queue.put(None)
         self._transcribe_queue.put(None)
         self._download_thread.join(timeout=5)

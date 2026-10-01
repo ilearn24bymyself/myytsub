@@ -295,6 +295,78 @@ class OrchestratorCancelQueuedTest(unittest.TestCase):
         orch.shutdown()
 
 
+def _wait_for(condition, timeout=4.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+class OrchestratorAutoRetryTest(unittest.TestCase):
+    """被限流的下載工作,過一段時間自動重試(使用者定的:6 小時,失敗再 6 小時);
+    這裡用很短的時間測行為。"""
+
+    def _limited_n_times(self, n, runs):
+        def download(payload, cancel_event, pause_event, report_progress):
+            runs.append(time.time())
+            if len(runs) <= n:
+                raise RateLimited("429")
+        return download
+
+    def test_a_rate_limited_download_is_retried_automatically_until_it_succeeds(self):
+        runs = []
+        orch = Orchestrator(self._limited_n_times(2, runs), lambda p, c, pe, rp: None, auto_retry_seconds=0.15)
+        job_id = orch.enqueue_download("u")
+        self.assertTrue(_wait_for(lambda: orch.get_job(job_id).state == JobState.DONE))
+        self.assertEqual(len(runs), 3)           # 第 1 次限流、第 2 次又限流、第 3 次成功
+        self.assertIsNone(orch.auto_retry_at)    # 沒有待重試的了,不再顯示倒數
+        orch.shutdown()
+
+    def test_without_the_setting_nothing_retries_by_itself(self):
+        runs = []
+        orch = Orchestrator(self._limited_n_times(1, runs), lambda p, c, pe, rp: None)
+        job_id = orch.enqueue_download("u")
+        orch.wait_idle()
+        time.sleep(0.4)
+        self.assertEqual(orch.get_job(job_id).state, JobState.PENDING_RETRY)
+        self.assertIsNone(orch.auto_retry_at)
+        orch.shutdown()
+
+    def test_the_screen_can_know_when_the_next_automatic_retry_happens(self):
+        runs = []
+        orch = Orchestrator(self._limited_n_times(1, runs), lambda p, c, pe, rp: None, auto_retry_seconds=5)
+        orch.enqueue_download("u")
+        orch.wait_idle()
+        self.assertTrue(_wait_for(lambda: orch.auto_retry_at is not None))
+        self.assertGreater(orch.auto_retry_at, time.time() + 3)
+        orch.shutdown()
+
+    def test_a_manual_retry_replaces_the_timer_so_nothing_runs_twice(self):
+        runs = []
+        orch = Orchestrator(self._limited_n_times(1, runs), lambda p, c, pe, rp: None, auto_retry_seconds=0.3)
+        job_id = orch.enqueue_download("u")
+        self.assertTrue(_wait_for(lambda: orch.get_job(job_id).state == JobState.PENDING_RETRY))
+        orch.retry_pending()
+        self.assertTrue(_wait_for(lambda: orch.get_job(job_id).state == JobState.DONE))
+        time.sleep(0.6)                           # 原本的計時器時間到了也不能再跑一次
+        self.assertEqual(len(runs), 2)
+        orch.shutdown()
+
+    def test_cancelling_a_waiting_job_stops_it_from_being_retried(self):
+        runs = []
+        orch = Orchestrator(self._limited_n_times(1, runs), lambda p, c, pe, rp: None, auto_retry_seconds=0.2)
+        job_id = orch.enqueue_download("u")
+        self.assertTrue(_wait_for(lambda: orch.get_job(job_id).state == JobState.PENDING_RETRY))
+        orch.cancel(job_id)
+        self.assertEqual(orch.get_job(job_id).state, JobState.CANCELLED)
+        time.sleep(0.5)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(orch.get_job(job_id).state, JobState.CANCELLED)
+        orch.shutdown()
+
+
 class OrchestratorProgressTest(unittest.TestCase):
     def test_report_progress_updates_job_progress_and_message_while_running(self):
         reached_50 = threading.Event()

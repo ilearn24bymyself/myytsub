@@ -643,6 +643,33 @@ class DownloadRouteOptionsTest(unittest.TestCase):
         self.assertIs(payload["skip_transcribed"], True)
 
 
+class AutoRetrySettingTest(unittest.TestCase):
+    """使用者定的:被 YouTube 限流後,等 6 小時自動重試,失敗再等 6 小時。畫面要看得到下一次重試的時間。"""
+
+    def test_the_real_orchestrator_retries_every_six_hours(self):
+        with mock.patch.object(server, "make_real_transcribe_fn", return_value=lambda *a: None):
+            orch = server.build_orchestrator()
+        try:
+            self.assertEqual(orch.auto_retry_seconds, 6 * 60 * 60)
+        finally:
+            orch.shutdown()
+
+    def test_the_jobs_list_tells_the_screen_when_the_next_retry_is(self):
+        import json
+        from http.server import ThreadingHTTPServer
+        fake_orchestrator = mock.Mock()
+        fake_orchestrator.list_jobs.return_value = []
+        fake_orchestrator.auto_retry_at = 1790000000.5
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(fake_orchestrator))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            data = json.load(urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/api/jobs"))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(data["auto_retry_at"], 1790000000.5)
+
+
 class FinalStatusMessagesTest(unittest.TestCase):
     """使用者實測畫面:工作「完成」了,狀態底下卻還寫「下載中」「轉錄中」。
     結束時要明確留下「做完了」這句話(final=True),orchestrator 才會用它取代進度文字。"""

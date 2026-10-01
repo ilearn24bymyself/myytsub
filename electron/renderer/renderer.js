@@ -125,7 +125,7 @@ function renderPending() {
 async function fetchJobs() {
   const res = await fetch("/api/jobs");
   const data = await res.json();
-  renderJobs(data.jobs);
+  renderJobs(data.jobs, data.auto_retry_at);
 }
 
 function stateLabel(state) {
@@ -139,7 +139,8 @@ function stateLabel(state) {
 // 勾選狀態跟著 job id 記,重新整理(輪詢)後同一筆項目的勾選不會被清掉,
 // 只有項目本身消失(不在最新的 jobs 清單裡)才會跟著清掉。
 const selectedJobIds = new Set();
-const CANCELLABLE_STATES = new Set(["pending", "running"]);
+// 待重試的也能勾起來取消(想放棄這一項,不再等自動重試)
+const CANCELLABLE_STATES = new Set(["pending", "running", "pending-retry"]);
 
 // Whisper 是一次處理 30 秒音訊才吐出結果,百分比會停一陣子再一次跳一大段;
 // 執行中多顯示「已執行 mm:ss」,持續在跳就代表還在跑,不是當掉
@@ -151,7 +152,14 @@ function formatElapsed(startedAt) {
   return ` · 已執行 ${mm}:${ss}`;
 }
 
-function renderJobs(jobs) {
+// 下一次自動重試的時間,例如「10/02 03:30」
+function formatRetryTime(epochSeconds) {
+  const d = new Date(epochSeconds * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function renderJobs(jobs, autoRetryAt) {
   const liveIds = new Set(jobs.map((j) => j.id));
   for (const id of [...selectedJobIds]) {
     if (!liveIds.has(id)) selectedJobIds.delete(id);
@@ -167,6 +175,7 @@ function renderJobs(jobs) {
     const stateCell = `
       <span class="state-${job.state}">${isPaused ? "已暫停" : stateLabel(job.state)}</span>
       ${job.message ? `<div style="font-size:12px;color:#666">${job.message}</div>` : ""}
+      ${job.state === "pending-retry" && autoRetryAt ? `<div style="font-size:12px;color:#b45309">將於 ${formatRetryTime(autoRetryAt)} 自動重試</div>` : ""}
       ${job.state === "running" ? `<div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div><div style="font-size:12px">${percent}%${isPaused ? " · 按「繼續」恢復,或按「取消」放棄" : formatElapsed(job.started_at)}</div>` : ""}
     `;
     const actions = [];

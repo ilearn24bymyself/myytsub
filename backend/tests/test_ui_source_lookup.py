@@ -75,6 +75,7 @@ def _mock_orchestrator():
     orch = mock.Mock()
     orch.list_jobs.return_value = []
     orch.enqueue_transcription.return_value = "1"
+    orch.auto_retry_at = None   # 要能轉成 JSON
     return orch
 
 

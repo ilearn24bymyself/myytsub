@@ -31,6 +31,7 @@ import source_lookup  # noqa: E402
 import source_sidecar  # noqa: E402
 
 
+AUTO_RETRY_SECONDS = 6 * 60 * 60   # 被限流的下載,等 6 小時自動重試,再被限流就再等 6 小時
 DEFAULT_GAP_MINUTES = 5   # 頻道/播放清單連續下載時,每支之間等幾分鐘(畫面可調,0=不等)
 
 
@@ -302,6 +303,7 @@ def build_orchestrator():
         download_fn=_download,
         transcribe_fn=make_real_transcribe_fn(),
         on_job_terminal=on_job_terminal,
+        auto_retry_seconds=AUTO_RETRY_SECONDS,
     )
     ref["orchestrator"] = orchestrator
     return orchestrator
@@ -364,7 +366,7 @@ def make_handler(orchestrator):
             path = urlparse(self.path).path
             if path == "/api/jobs":
                 jobs = [_job_to_dict(j) for j in orchestrator.list_jobs()]
-                self._send_json(200, {"jobs": jobs})
+                self._send_json(200, {"jobs": jobs, "auto_retry_at": orchestrator.auto_retry_at})
             else:
                 self._serve_static(path)
 
