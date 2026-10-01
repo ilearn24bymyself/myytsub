@@ -80,7 +80,7 @@ def _find_previously_downloaded_path(url: str) -> str | None:
     return download_record.find_path_by_title(str(BASE_DIR), sanitize_filename(title))
 
 
-def make_real_download_fn(orchestrator):
+def make_real_download_fn(orchestrator, queued_paths=None):
     """下載完成後自動接一個轉錄工作,轉錄選項(是否要字幕/跳過已存在)由呼叫端
     在 payload 裡指定,這裡原樣轉給轉錄工作,不自己決定預設值。
     build_day_index() 只掃 transcripts/*.txt,不看 downloads/,所以純下載的
@@ -91,7 +91,12 @@ def make_real_download_fn(orchestrator):
 
     下載前先只列清單(頻道/播放清單可能幾百支),逐支對照「總清單」(掃描所有日期資料夾):
     已有逐字稿的略過(可關)、已下載但沒轉錄的直接補排轉錄、全新的才真的下載。
-    payload 的 download_only=True 代表只下載不轉錄。"""
+    payload 的 download_only=True 代表只下載不轉錄。
+    queued_paths:已經排過轉錄的檔案(各個下載工作共用):總清單只在工作開頭掃一次,
+    前一個工作排的轉錄還沒做完時,同一個檔案在下一個工作看起來還是「沒有逐字稿」,
+    不記住的話會重複排轉錄。"""
+    queued = queued_paths if queued_paths is not None else set()
+
     def _download(payload, cancel_event, pause_event, report_progress):
         d = today_dir()
         handled = set()
@@ -110,6 +115,10 @@ def make_real_download_fn(orchestrator):
         def _queue_transcription(path, metadata):
             if download_only:
                 return
+            key = os.path.normcase(os.path.abspath(path))
+            if key in queued:
+                return
+            queued.add(key)
             orchestrator.enqueue_transcription({
                 "path": path,
                 "want_srt": payload.get("want_srt", True),
@@ -133,70 +142,86 @@ def make_real_download_fn(orchestrator):
                 traceback.print_exc()  # 資訊檔寫不了不能擋住轉錄
             download_record.save([entry])
             _queue_transcription(entry["path"], entry)
-            _refresh_summary()
 
-        entries = list_entries(payload["url"])
-        if entries is None:
-            # 讀不到清單:退回老做法,整個網址交給 yt-dlp 一次處理(沒有標題可以預先判斷)
-            entries = [{"url": payload["url"], "title": None, "video_id": None, "channel": None, "upload_date": None}]
-        known = ledger.scan(BASE_DIR)
-        skip_transcribed = payload.get("skip_transcribed", True)
-        gap_seconds = max(0, float(payload.get("gap_minutes", DEFAULT_GAP_MINUTES))) * 60
-        skipped = 0
-        downloaded_any = False
+        try:
+            entries = list_entries(payload["url"])
+            if entries is None:
+                # 讀不到清單:退回老做法,整個網址交給 yt-dlp 一次處理(沒有標題可以預先判斷)
+                entries = [{"url": payload["url"], "title": None, "video_id": None, "channel": None, "upload_date": None}]
+            known = ledger.scan(BASE_DIR)
+            skip_transcribed = payload.get("skip_transcribed", True)
+            gap_seconds = _gap_seconds(payload)
+            skipped = 0
+            downloaded_any = False
 
-        for item in entries:
-            if cancel_event.is_set():
-                return
-            stem = sanitize_filename(item["title"]) if item.get("title") else None
-            has_transcript = bool(stem) and known.has_transcript(stem)
-            existing_path = known.downloaded_path(stem) if stem else None
-            if has_transcript and skip_transcribed:
-                skipped += 1
-                continue
-            if existing_path:
-                skipped += 1
-                if not has_transcript:
-                    # 下載過、卻沒有逐字稿(例如中途重開機、轉錄佇列沒了):補排轉錄
-                    _queue_transcription(existing_path, {
-                        "path": existing_path, "title": item["title"], "channel": item.get("channel"),
-                        "url": item["url"], "upload_date": item.get("upload_date"),
-                        "video_id": item.get("video_id")})
-                continue
-            if downloaded_any and gap_seconds > 0:
-                # 連續下載很快會被 YouTube 限流:每支之間等一下(只在「下一支真的要下載」時才等,
-                # 略過的、第一支、最後一支之後都不等)。用取消旗標等待,按取消會立刻醒來
-                report_progress(100.0 * entries.index(item) / len(entries),
-                                f"等待 {gap_seconds / 60:g} 分鐘後下載下一支(降低被限流的機率)")
-                if cancel_event.wait(gap_seconds):
+            for position, item in enumerate(entries):
+                if cancel_event.is_set():
                     return
-            downloaded_any = True
-            downloaded = download_media(
-                item["url"], output_dir=str(d / "downloads"),
-                format_type=payload.get("format_type", "audio"),
-                progress_callback=_progress, stop_event=cancel_event,
-                on_item_done=_handle,
-            )
-            # 檔案鎖定重試救回來的檔案不會經過即時回報,這裡補處理(已處理過的會跳過)
-            for entry in downloaded:
-                _handle(entry)
+                stem = sanitize_filename(item["title"]) if item.get("title") else None
+                has_transcript = bool(stem) and known.has_transcript(stem)
+                existing_path = known.downloaded_path(stem) if stem else None
+                if has_transcript and skip_transcribed:
+                    skipped += 1
+                    continue
+                if existing_path:
+                    skipped += 1
+                    if not has_transcript:
+                        # 下載過、卻沒有逐字稿(例如中途重開機、轉錄佇列沒了):補排轉錄
+                        _queue_transcription(existing_path, {
+                            "path": existing_path, "title": item["title"], "channel": item.get("channel"),
+                            "url": item["url"], "upload_date": item.get("upload_date"),
+                            "video_id": item.get("video_id")})
+                    continue
+                if downloaded_any and gap_seconds > 0:
+                    # 連續下載很快會被 YouTube 限流:每支之間等一下(只在「下一支真的要下載」時才等,
+                    # 略過的、第一支、最後一支之後都不等)。用取消旗標等待,按取消會立刻醒來
+                    report_progress(100.0 * position / len(entries),
+                                    f"等待 {gap_seconds / 60:g} 分鐘後下載下一支(降低被限流的機率)")
+                    if cancel_event.wait(gap_seconds):
+                        return
+                handled_before = len(handled)
+                downloaded = download_media(
+                    item["url"], output_dir=str(d / "downloads"),
+                    format_type=payload.get("format_type", "audio"),
+                    progress_callback=_progress, stop_event=cancel_event,
+                    on_item_done=_handle,
+                )
+                # 檔案鎖定重試救回來的檔案不會經過即時回報,這裡補處理(已處理過的會跳過)
+                for entry in downloaded:
+                    _handle(entry)
+                # 真的有下載到東西才算(yt-dlp 因 archive 靜默略過、沒有新檔案時,下一支不必等)
+                if len(handled) > handled_before:
+                    downloaded_any = True
 
-        if not handled:
-            if len(entries) == 1 and skipped == 0:
-                # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
-                # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
-                # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因,並且
-                # 盡量把之前下載到哪裡也一併告訴使用者。
-                found_path = _find_previously_downloaded_path(entries[0]["url"])
-                if found_path:
-                    report_progress(100.0, f"已下載過,略過 → {found_path}", final=True)
+            if not handled:
+                if len(entries) == 1 and skipped == 0:
+                    # yt-dlp 的 download_archive 記錄過這支影片時,download_media() 會
+                    # 靜默回傳空陣列(不下載、不報錯)。這裡刻意不要讓它看起來跟正常
+                    # 完成一樣——沒有檔案、也沒有接轉錄工作,要讓使用者知道原因,並且
+                    # 盡量把之前下載到哪裡也一併告訴使用者。
+                    found_path = _find_previously_downloaded_path(entries[0]["url"])
+                    if found_path:
+                        report_progress(100.0, f"已下載過,略過 → {found_path}", final=True)
+                    else:
+                        report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)", final=True)
                 else:
-                    report_progress(100.0, "已下載過,略過(找不到之前下載到哪裡,可能是舊記錄)", final=True)
-            else:
-                report_progress(100.0, f"沒有新影片需要下載(略過 {skipped} 支:已下載過或已有逐字稿)", final=True)
-            return
-        report_progress(100.0, "下載完成", final=True)
+                    report_progress(100.0, f"沒有新影片需要下載(略過 {skipped} 支:已下載過或已有逐字稿)", final=True)
+                return
+            report_progress(100.0, "下載完成", final=True)
+        finally:
+            _refresh_summary()   # 每個工作結束時更新一次(被限流、被取消、全部略過也一樣)
     return _download
+
+
+def _gap_seconds(payload):
+    """每支下載之間要等幾秒。亂填(不是數字)用預設值,負數當 0;不能讓一個壞設定讓整個工作出錯。"""
+    try:
+        minutes = float(payload.get("gap_minutes", DEFAULT_GAP_MINUTES))
+    except (TypeError, ValueError):
+        minutes = DEFAULT_GAP_MINUTES
+    if minutes != minutes:   # NaN
+        minutes = DEFAULT_GAP_MINUTES
+    return max(0.0, minutes) * 60
 
 
 def lookup_source(path):
@@ -288,15 +313,22 @@ def build_orchestrator():
     ref = {}
 
     def _download(payload, cancel_event, pause_event, report_progress):
-        make_real_download_fn(ref["orchestrator"])(payload, cancel_event, pause_event, report_progress)
+        make_real_download_fn(ref["orchestrator"], queued_paths)(payload, cancel_event, pause_event, report_progress)
 
     batch = BatchCompletion(
         is_settled=lambda: ref["orchestrator"].is_settled(),
         on_complete=open_result_folders,
     )
 
+    queued_paths = set()   # 各個下載工作共用:已經排過轉錄的檔案不再重複排
+
     def on_job_terminal(job):
         build_day_index(str(today_dir()))
+        if job.type == JobType.TRANSCRIBE:
+            try:
+                ledger.write_summary(BASE_DIR)   # 逐字稿剛做完,總清單的「逐字稿哪天」要跟著更新
+            except Exception:
+                traceback.print_exc()
         batch.on_job_terminal(job)
 
     orchestrator = Orchestrator(

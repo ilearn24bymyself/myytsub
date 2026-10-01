@@ -123,10 +123,20 @@ class Orchestrator:
         if timer is not None:
             timer.cancel()
         for job in to_retry:
+            if not self._requeue_if_waiting(job):
+                continue   # 挑出來之後、重新排隊之前被取消了:不能把它改回排隊中
+            self._download_queue.put(job)
+
+    def _requeue_if_waiting(self, job):
+        """把「待重試」的工作改回排隊中。狀態檢查和修改在同一把鎖裡,
+        跟 cancel() 不會交錯;已經不是待重試(例如剛被取消)就不動,回傳 False。"""
+        with self._lock:
+            if job.state != JobState.PENDING_RETRY:
+                return False
             job.state = JobState.PENDING
             job.message = None  # 排隊中不該還寫著上一輪的限流說明
             job.final_message = None
-            self._download_queue.put(job)
+        return True
 
     def _schedule_auto_retry(self):
         if not self.auto_retry_seconds:
@@ -171,6 +181,13 @@ class Orchestrator:
                 job.state = JobState.CANCELLED
                 job.message = None
                 job.final_message = None
+                # 最後一個等著重試的也被取消了:自動重試的計時器和倒數一起撤掉
+                still_waiting = any(j.state == JobState.PENDING_RETRY for j in self._jobs.values())
+                timer = None if still_waiting else self._retry_timer
+                if timer is not None:
+                    self._retry_timer = None
+                    self.auto_retry_at = None
+                    timer.cancel()
         if cancel_now:
             self._finish(job, JobState.CANCELLED)
 

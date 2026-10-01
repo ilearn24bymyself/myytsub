@@ -8,6 +8,7 @@
 let pending = [];
 
 function currentOptions() {
+  const gapMinutes = parseFloat(document.getElementById("gap-minutes").value);
   return {
     format_type: document.getElementById("format-type").value,
     want_srt: document.getElementById("want-srt").checked,
@@ -15,8 +16,7 @@ function currentOptions() {
     skip_transcribed: document.getElementById("skip-transcribed").checked,
     download_only: document.getElementById("download-only").checked,
     // 空白或亂填就當 5 分鐘預設;0 = 不等
-    gap_minutes: Number.isFinite(parseFloat(document.getElementById("gap-minutes").value))
-      ? Math.max(0, parseFloat(document.getElementById("gap-minutes").value)) : 5,
+    gap_minutes: Number.isFinite(gapMinutes) ? Math.max(0, gapMinutes) : 5,
   };
 }
 
@@ -222,10 +222,10 @@ function renderJobs(jobs, autoRetryAt) {
 function syncSelectAll() {
   const boxes = document.querySelectorAll("#jobs-table tbody [data-select]");
   const checked = Array.from(boxes).filter((b) => b.checked).length;
-  const all = document.getElementById("select-all");
-  all.disabled = boxes.length === 0;
-  all.checked = boxes.length > 0 && checked === boxes.length;
-  all.indeterminate = checked > 0 && checked < boxes.length;
+  const selectAll = document.getElementById("select-all");
+  selectAll.disabled = boxes.length === 0;
+  selectAll.checked = boxes.length > 0 && checked === boxes.length;
+  selectAll.indeterminate = checked > 0 && checked < boxes.length;
 }
 
 document.getElementById("select-all").addEventListener("change", (e) => {

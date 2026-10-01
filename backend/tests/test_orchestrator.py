@@ -359,11 +359,34 @@ class OrchestratorAutoRetryTest(unittest.TestCase):
         orch = Orchestrator(self._limited_n_times(1, runs), lambda p, c, pe, rp: None, auto_retry_seconds=0.2)
         job_id = orch.enqueue_download("u")
         self.assertTrue(_wait_for(lambda: orch.get_job(job_id).state == JobState.PENDING_RETRY))
+        self.assertIsNotNone(orch.auto_retry_at)       # 取消前確實排了自動重試
         orch.cancel(job_id)
         self.assertEqual(orch.get_job(job_id).state, JobState.CANCELLED)
+        self.assertIsNone(orch.auto_retry_at)          # 沒有等著重試的工作了,計時器和倒數也一起撤掉
         time.sleep(0.5)
         self.assertEqual(len(runs), 1)
         self.assertEqual(orch.get_job(job_id).state, JobState.CANCELLED)
+        orch.shutdown()
+
+    def test_the_timer_stays_while_other_jobs_are_still_waiting(self):
+        runs = []
+        orch = Orchestrator(self._limited_n_times(99, runs), lambda p, c, pe, rp: None, auto_retry_seconds=5)
+        first = orch.enqueue_download("a")
+        orch.enqueue_download("b")
+        orch.wait_idle()
+        orch.cancel(first)
+        self.assertIsNotNone(orch.auto_retry_at)       # 還有一個在等,不能撤掉
+        orch.shutdown()
+
+    def test_a_job_cancelled_while_waiting_is_not_revived_by_a_retry_that_already_picked_it(self):
+        # retry_pending 先挑出待重試的工作、之後才逐一改狀態;中間被取消的不能被改回「排隊中」
+        orch = Orchestrator(lambda *a: None, lambda *a: None)
+        job = orch.get_job(orch.enqueue_download("u"))
+        orch.wait_idle()
+        job.state = JobState.PENDING_RETRY
+        orch.cancel(job.id)
+        self.assertFalse(orch._requeue_if_waiting(job))
+        self.assertEqual(job.state, JobState.CANCELLED)
         orch.shutdown()
 
 

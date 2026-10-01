@@ -458,19 +458,24 @@ class ListedDownloadDecisionsTest(unittest.TestCase):
     """下載前先列清單、逐支判斷:已有逐字稿的不下載、已下載沒轉錄的補排轉錄、
     只下載不轉錄的不排轉錄。判斷的依據是掃描所有日期資料夾的總清單。"""
 
-    def _run(self, entries, known=None, payload=None, downloaded=None, cancel_after=None, cancelled_while_waiting=False):
+    def _run(self, entries, known=None, payload=None, downloaded=None, cancel_after=None, cancelled_while_waiting=False,
+             queued_paths=None, download_error_on=None):
         known = known or ledger.Ledger()
         fake_orchestrator = mock.Mock()
         report = mock.Mock()
         cancel = _not_cancelled()
         cancel.wait.return_value = cancelled_while_waiting
         self.cancel = cancel
+        self.error = None
         calls = []
 
         def fake_download_media(url, **kwargs):
             calls.append(url)
             if cancel_after is not None and len(calls) >= cancel_after:
                 cancel.is_set.return_value = True
+            if download_error_on is not None and len(calls) == download_error_on:
+                from orchestrator import RateLimited
+                raise RateLimited("429")
             entry = (downloaded or {}).get(url)
             if entry:
                 kwargs["on_item_done"](entry)
@@ -484,9 +489,12 @@ class ListedDownloadDecisionsTest(unittest.TestCase):
              mock.patch.object(server, "download_record"), \
              mock.patch.object(server, "source_sidecar") as fake_sidecar, \
              mock.patch.object(server, "today_dir", return_value=Path("C:/fake/20261001")):
-            server.make_real_download_fn(fake_orchestrator)(
-                dict({"url": "https://www.youtube.com/@ch/videos", "want_srt": True, "skip_existing": True},
-                     **(payload or {})), cancel, mock.Mock(), report)
+            run = server.make_real_download_fn(fake_orchestrator, queued_paths=queued_paths)
+            try:
+                run(dict({"url": "https://www.youtube.com/@ch/videos", "want_srt": True, "skip_existing": True},
+                         **(payload or {})), cancel, mock.Mock(), report)
+            except Exception as e:  # noqa: BLE001 - 限流測試要看丟出來的是什麼
+                self.error = e
         queued = [c.args[0] for c in fake_orchestrator.enqueue_transcription.call_args_list]
         return calls, queued, report, fake_sidecar, fake_summary
 
@@ -575,6 +583,42 @@ class ListedDownloadDecisionsTest(unittest.TestCase):
         a, b, got = self._two_new()
         calls, _q, _r, _s, _f = self._run([a, b], downloaded=got, cancelled_while_waiting=True)
         self.assertEqual(calls, [a["url"]])   # 乙沒有被下載
+
+
+    def test_a_second_job_does_not_queue_the_same_file_again_while_the_first_transcription_is_pending(self):
+        # 總清單只在工作開頭掃一次:第一個工作排的轉錄還沒做完,檔案看起來還是「下載過、沒逐字稿」
+        a = _listed("下載過沒轉錄", "aaaaaaaaaaa")
+        known = self._known(downloads=[("下載過沒轉錄", "C:/fake/20260924/downloads/下載過沒轉錄.mp4")])
+        shared = set()
+        _c, first, _r, _s, _f = self._run([a], known=known, queued_paths=shared)
+        _c, second, _r, _s, _f = self._run([a], known=known, queued_paths=shared)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(second, [])
+
+    def test_a_video_that_yt_dlp_silently_skipped_does_not_cause_a_wait(self):
+        # download_media 回傳空(影片在 archive 裡但檔案不見了):沒有真的下載,下一支不用等
+        a, b, got = self._two_new()
+        calls, _q, _r, _s, _f = self._run([a, b], downloaded={b["url"]: got[b["url"]]})
+        self.assertEqual(calls, [a["url"], b["url"]])
+        self.cancel.wait.assert_not_called()
+
+    def test_a_bad_wait_setting_falls_back_to_the_default_instead_of_crashing_the_job(self):
+        a, b, got = self._two_new()
+        self._run([a, b], payload={"gap_minutes": "abc"}, downloaded=got)
+        self.cancel.wait.assert_called_once_with(300)
+        self._run([a, b], payload={"gap_minutes": -3}, downloaded=got)
+        self.cancel.wait.assert_not_called()          # 負數當 0
+
+    def test_the_summary_is_refreshed_at_the_end_even_when_the_job_is_cut_short_by_a_rate_limit(self):
+        a, b, got = self._two_new()
+        _c, _q, _r, _s, fake_summary = self._run([a, b], payload={"gap_minutes": 0}, downloaded=got, download_error_on=2)
+        self.assertEqual(type(self.error).__name__, "RateLimited")
+        self.assertTrue(fake_summary.called)
+
+    def test_the_summary_is_refreshed_once_per_job_not_after_every_video(self):
+        a, b, got = self._two_new()
+        _c, _q, _r, _s, fake_summary = self._run([a, b], payload={"gap_minutes": 0}, downloaded=got)
+        self.assertEqual(fake_summary.call_count, 1)
 
     def test_the_summary_file_is_refreshed_when_a_video_finishes(self):
         a = _listed("全新的", "aaaaaaaaaaa")
@@ -777,6 +821,12 @@ class AutoOpenFoldersTest(unittest.TestCase):
                 orch.wait_idle()
                 orch.shutdown()
             return day, fake_open
+
+    def test_a_finished_transcription_refreshes_the_summary_file(self):
+        with mock.patch.object(server.ledger, "write_summary") as fake_summary:
+            self._run_batch(lambda orch: orch.enqueue_transcription(
+                {"path": "C:/fake/v.mp4", "want_srt": False, "skip_existing": False}))
+        self.assertTrue(fake_summary.called)
 
     def test_local_file_transcription_opens_only_the_transcripts_folder(self):
         day, fake_open = self._run_batch(lambda orch: orch.enqueue_transcription(
