@@ -12,6 +12,11 @@ from orchestrator import RateLimited
 # 挑出真的下載過的那支(不是模組內部變數,別處要查就得重複算路徑)。
 ARCHIVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'download_archive.txt')
 
+# 還沒下載完的暫存檔(.part 等)固定放這裡,不跟著日期資料夾走:今天重開程式、已經是另一天,
+# 昨天被限流/中斷留下的檔案仍然接得上;下載完成才搬進「完成那天」的 downloads 資料夾。
+# 放專案根目錄、名稱不是日期,不會被當成日期資料夾掃描。
+PARTIAL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '_partial_downloads')
+
 # YouTube 限流/IP 鎖定的已知訊號:HTTP 429、bot-check 提示訊息。
 # 跟一般性錯誤(檔案損毀、網路中斷、影片下架)區分開來 —— 這類訊號代表整個
 # 來源 IP 被鎖,不是這一支影片本身的問題,不該對它逐支重試。
@@ -37,9 +42,12 @@ def _try_rename_temp(output_dir: str, format_type: str, downloaded_files: list) 
     """
     ext = "mp3" if format_type == "audio" else "mp4"
     existing_paths = {d["path"] for d in downloaded_files}
-    for f in os.listdir(output_dir):
+    candidates = [(output_dir, f) for f in os.listdir(output_dir)]
+    if os.path.isdir(PARTIAL_DIR):
+        candidates += [(PARTIAL_DIR, f) for f in os.listdir(PARTIAL_DIR)]
+    for folder, f in candidates:
         if f.endswith('.temp.mp4') or f.endswith('.temp.m4a'):
-            temp_path = os.path.join(output_dir, f)
+            temp_path = os.path.join(folder, f)
             # 驗證檔案是否已被系統釋放
             try:
                 with open(temp_path, 'a+b'):
@@ -121,6 +129,7 @@ def download_media(url: str, output_dir: str, format_type: str = "audio",
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(PARTIAL_DIR, exist_ok=True)
 
     ffmpeg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin')
     archive_file = ARCHIVE_FILE
@@ -141,7 +150,10 @@ def download_media(url: str, output_dir: str, format_type: str = "audio",
     ydl_opts = {
         'ffmpeg_location': ffmpeg_dir,
         'download_archive': archive_file,
-        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
+        # 最終檔案放 output_dir(完成那天的資料夾),下載到一半的暫存檔放 PARTIAL_DIR(跨日也接得上)。
+        # outtmpl 必須是相對路徑,yt-dlp 才會套用 paths(絕對路徑會讓 paths 失效)
+        'outtmpl': '%(title)s.%(ext)s',
+        'paths': {'home': output_dir, 'temp': PARTIAL_DIR},
         'ignoreerrors': False,
         'no_warnings': True,
         'quiet': False,
