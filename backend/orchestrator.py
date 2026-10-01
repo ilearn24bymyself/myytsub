@@ -221,7 +221,11 @@ class Orchestrator:
                 job.final_message = _MSG_RATE_LIMITED
                 self._finish(job, JobState.PENDING_RETRY)
             except Exception as e:
-                self._finish(job, JobState.ERROR, str(e))
+                if job.cancel_event.is_set():
+                    # 使用者按了取消:yt-dlp 用丟例外中斷下載,這不是失敗
+                    self._finish(job, JobState.CANCELLED)
+                else:
+                    self._finish(job, JobState.ERROR, str(e))
             else:
                 if job.cancel_event.is_set():
                     self._finish(job, JobState.CANCELLED)

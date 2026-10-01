@@ -214,6 +214,38 @@ class OrchestratorCancelTest(unittest.TestCase):
         orch.shutdown()
 
 
+class OrchestratorCancelledDownloadTest(unittest.TestCase):
+    def test_a_download_stopped_by_the_user_ends_as_cancelled_not_failed(self):
+        # yt-dlp 是用丟例外(DownloadCancelled)來中斷下載;使用者按了取消的話,這不是「失敗」
+        started = threading.Event()
+
+        def download(payload, cancel_event, pause_event, report_progress):
+            started.set()
+            cancel_event.wait(timeout=2)
+            raise RuntimeError("使用者已停止")
+
+        orch = Orchestrator(download_fn=download, transcribe_fn=lambda p, c, pe, rp: None)
+        job_id = orch.enqueue_download("slow")
+        self.assertTrue(started.wait(timeout=1))
+        orch.cancel(job_id)
+        orch.wait_idle()
+        job = orch.get_job(job_id)
+        self.assertEqual(job.state, JobState.CANCELLED)
+        self.assertIsNone(job.error_message)
+        orch.shutdown()
+
+    def test_a_real_failure_without_a_cancel_is_still_an_error(self):
+        def download(payload, cancel_event, pause_event, report_progress):
+            raise RuntimeError("影片已下架")
+
+        orch = Orchestrator(download_fn=download, transcribe_fn=lambda p, c, pe, rp: None)
+        job_id = orch.enqueue_download("gone")
+        orch.wait_idle()
+        self.assertEqual(orch.get_job(job_id).state, JobState.ERROR)
+        self.assertEqual(orch.get_job(job_id).error_message, "影片已下架")
+        orch.shutdown()
+
+
 class OrchestratorCancelQueuedTest(unittest.TestCase):
     """排隊中的工作按取消,當下就要變成「已取消」,不用等輪到它;輪到時也不能真的執行。"""
 
