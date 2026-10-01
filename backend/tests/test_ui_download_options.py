@@ -11,15 +11,16 @@ from test_ui_status_display import CHROME  # noqa: E402
 DRIVER = """<script>
 document.getElementById("download-only").checked = %s;
 document.getElementById("skip-transcribed").checked = %s;
+document.getElementById("gap-minutes").value = "%s";
 document.getElementById("yt-url").value = "https://www.youtube.com/@channel/videos";
 document.getElementById("add-url").click();
 document.getElementById("start-btn").click();
 </script>"""
 
 
-def _page(download_only, skip_transcribed):
+def _page(download_only, skip_transcribed, gap="5"):
     page = (server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    driver = DRIVER % (str(download_only).lower(), str(skip_transcribed).lower())
+    driver = DRIVER % (str(download_only).lower(), str(skip_transcribed).lower(), gap)
     return page.replace('<script src="renderer.js"></script>', '<script src="renderer.js"></script>' + driver)
 
 
@@ -27,10 +28,10 @@ def _page(download_only, skip_transcribed):
 class DownloadOptionsInPageTest(unittest.TestCase):
     """畫面上多了兩個選項:「只下載,不轉錄」「略過已有逐字稿的影片」,按開始處理時要連同網址一起送出。"""
 
-    def _submitted(self, download_only, skip_transcribed):
+    def _submitted(self, download_only, skip_transcribed, gap="5"):
         orch = _mock_orchestrator()
         orch.enqueue_download.return_value = "1"
-        _serve_and_dump(orch, _page(download_only, skip_transcribed), lambda p: None)
+        _serve_and_dump(orch, _page(download_only, skip_transcribed, gap), lambda p: None)
         self.assertEqual(orch.enqueue_download.call_count, 1)
         return orch.enqueue_download.call_args.args[0]
 
@@ -39,6 +40,10 @@ class DownloadOptionsInPageTest(unittest.TestCase):
         self.assertEqual(payload["url"], "https://www.youtube.com/@channel/videos")
         self.assertIs(payload["download_only"], True)
         self.assertIs(payload["skip_transcribed"], False)
+
+    def test_the_wait_between_downloads_is_sent_as_a_number(self):
+        self.assertEqual(self._submitted(False, True, gap="12")["gap_minutes"], 12)
+        self.assertEqual(self._submitted(False, True, gap="0")["gap_minutes"], 0)
 
     def test_the_opposite_choices_are_sent_too(self):
         payload = self._submitted(download_only=False, skip_transcribed=True)

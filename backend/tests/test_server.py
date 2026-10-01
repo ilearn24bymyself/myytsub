@@ -445,6 +445,7 @@ class TranscriptionSourceOrderTest(unittest.TestCase):
 def _not_cancelled():
     flag = mock.Mock()
     flag.is_set.return_value = False
+    flag.wait.return_value = False   # Event.wait():等滿時間沒被取消回傳 False
     return flag
 
 
@@ -457,12 +458,13 @@ class ListedDownloadDecisionsTest(unittest.TestCase):
     """下載前先列清單、逐支判斷:已有逐字稿的不下載、已下載沒轉錄的補排轉錄、
     只下載不轉錄的不排轉錄。判斷的依據是掃描所有日期資料夾的總清單。"""
 
-    def _run(self, entries, known=None, payload=None, downloaded=None, cancel_after=None):
+    def _run(self, entries, known=None, payload=None, downloaded=None, cancel_after=None, cancelled_while_waiting=False):
         known = known or ledger.Ledger()
         fake_orchestrator = mock.Mock()
         report = mock.Mock()
-        cancel = mock.Mock()
-        cancel.is_set.return_value = False
+        cancel = _not_cancelled()
+        cancel.wait.return_value = cancelled_while_waiting
+        self.cancel = cancel
         calls = []
 
         def fake_download_media(url, **kwargs):
@@ -544,6 +546,36 @@ class ListedDownloadDecisionsTest(unittest.TestCase):
         calls, _q, _r, _s, _f = self._run([a, b], cancel_after=1)
         self.assertEqual(calls, [a["url"]])
 
+    def _two_new(self):
+        a, b = _listed("甲", "aaaaaaaaaaa"), _listed("乙", "bbbbbbbbbbb")
+        got = {x["url"]: {"path": f"C:/fake/20261001/downloads/{x['title']}.mp4", "title": x["title"], "channel": "頻道",
+                          "url": x["url"], "upload_date": None, "video_id": x["video_id"]} for x in (a, b)}
+        return a, b, got
+
+    def test_it_waits_between_downloads_but_not_before_the_first_or_after_the_last(self):
+        a, b, got = self._two_new()
+        calls, _q, _r, _s, _f = self._run([a, b], payload={"gap_minutes": 5}, downloaded=got)
+        self.assertEqual(calls, [a["url"], b["url"]])
+        self.cancel.wait.assert_called_once_with(300)
+
+    def test_the_default_wait_is_five_minutes_and_zero_turns_it_off(self):
+        a, b, got = self._two_new()
+        self._run([a, b], downloaded=got)
+        self.cancel.wait.assert_called_once_with(300)
+        self._run([a, b], payload={"gap_minutes": 0}, downloaded=got)
+        self.cancel.wait.assert_not_called()
+
+    def test_skipped_videos_do_not_cause_waiting(self):
+        a, b, got = self._two_new()
+        calls, _q, _r, _s, _f = self._run([a, b], known=self._known(transcripts=["甲"]), downloaded=got)
+        self.assertEqual(calls, [b["url"]])
+        self.cancel.wait.assert_not_called()
+
+    def test_cancelling_during_the_wait_stops_right_away(self):
+        a, b, got = self._two_new()
+        calls, _q, _r, _s, _f = self._run([a, b], downloaded=got, cancelled_while_waiting=True)
+        self.assertEqual(calls, [a["url"]])   # 乙沒有被下載
+
     def test_the_summary_file_is_refreshed_when_a_video_finishes(self):
         a = _listed("全新的", "aaaaaaaaaaa")
         new = {"path": "C:/fake/20261001/downloads/全新的.mp4", "title": "全新的", "channel": "頻道",
@@ -600,6 +632,10 @@ class DownloadRouteOptionsTest(unittest.TestCase):
         payload = self._post({"url": "https://youtube.com/@x", "download_only": True, "skip_transcribed": False})
         self.assertIs(payload["download_only"], True)
         self.assertIs(payload["skip_transcribed"], False)
+
+    def test_the_wait_between_downloads_defaults_to_five_minutes_and_can_be_changed(self):
+        self.assertEqual(self._post({"url": "https://youtube.com/@x"})["gap_minutes"], 5)
+        self.assertEqual(self._post({"url": "https://youtube.com/@x", "gap_minutes": 0})["gap_minutes"], 0)
 
     def test_defaults_are_download_and_transcribe_and_skip_videos_with_a_transcript(self):
         payload = self._post({"url": "https://youtube.com/@x"})

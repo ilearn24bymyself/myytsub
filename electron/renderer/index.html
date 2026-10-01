@@ -43,6 +43,7 @@
     <br>
     <label title="下載頻道/播放清單前,先對照所有日期資料夾:已經有逐字稿的影片就不再下載"><input type="checkbox" id="skip-transcribed" checked> 略過已有逐字稿的影片(不下載)</label>
     <label title="只把影片抓下來,不自動轉成逐字稿"><input type="checkbox" id="download-only"> 只下載,不轉錄</label>
+    <label title="頻道/播放清單連續下載時,每下載完一支先等幾分鐘再下載下一支,降低被 YouTube 限流的機率。填 0 就不等">每支下載後等待 <input type="number" id="gap-minutes" value="5" min="0" step="1" style="width:56px"> 分鐘</label>
   </fieldset>
 
   <section>

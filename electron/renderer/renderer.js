@@ -14,6 +14,9 @@ function currentOptions() {
     skip_existing: document.getElementById("skip-existing").checked,
     skip_transcribed: document.getElementById("skip-transcribed").checked,
     download_only: document.getElementById("download-only").checked,
+    // 空白或亂填就當 5 分鐘預設;0 = 不等
+    gap_minutes: Number.isFinite(parseFloat(document.getElementById("gap-minutes").value))
+      ? Math.max(0, parseFloat(document.getElementById("gap-minutes").value)) : 5,
   };
 }
 

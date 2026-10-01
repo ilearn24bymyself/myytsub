@@ -31,6 +31,9 @@ import source_lookup  # noqa: E402
 import source_sidecar  # noqa: E402
 
 
+DEFAULT_GAP_MINUTES = 5   # 頻道/播放清單連續下載時,每支之間等幾分鐘(畫面可調,0=不等)
+
+
 def today_dir() -> Path:
     d = BASE_DIR / date.today().strftime("%Y%m%d")
     (d / "downloads").mkdir(parents=True, exist_ok=True)
@@ -137,7 +140,9 @@ def make_real_download_fn(orchestrator):
             entries = [{"url": payload["url"], "title": None, "video_id": None, "channel": None, "upload_date": None}]
         known = ledger.scan(BASE_DIR)
         skip_transcribed = payload.get("skip_transcribed", True)
+        gap_seconds = max(0, float(payload.get("gap_minutes", DEFAULT_GAP_MINUTES))) * 60
         skipped = 0
+        downloaded_any = False
 
         for item in entries:
             if cancel_event.is_set():
@@ -157,6 +162,14 @@ def make_real_download_fn(orchestrator):
                         "url": item["url"], "upload_date": item.get("upload_date"),
                         "video_id": item.get("video_id")})
                 continue
+            if downloaded_any and gap_seconds > 0:
+                # 連續下載很快會被 YouTube 限流:每支之間等一下(只在「下一支真的要下載」時才等,
+                # 略過的、第一支、最後一支之後都不等)。用取消旗標等待,按取消會立刻醒來
+                report_progress(100.0 * entries.index(item) / len(entries),
+                                f"等待 {gap_seconds / 60:g} 分鐘後下載下一支(降低被限流的機率)")
+                if cancel_event.wait(gap_seconds):
+                    return
+            downloaded_any = True
             downloaded = download_media(
                 item["url"], output_dir=str(d / "downloads"),
                 format_type=payload.get("format_type", "audio"),
@@ -367,6 +380,7 @@ def make_handler(orchestrator):
                     "skip_existing": body.get("skip_existing", True),
                     "download_only": bool(body.get("download_only", False)),
                     "skip_transcribed": bool(body.get("skip_transcribed", True)),
+                    "gap_minutes": body.get("gap_minutes", DEFAULT_GAP_MINUTES),
                 })
                 self._send_json(200, {"id": job_id})
             elif path == "/api/jobs/transcribe":
