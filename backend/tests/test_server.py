@@ -532,6 +532,15 @@ class ListedDownloadDecisionsTest(unittest.TestCase):
         self.assertEqual(queued[0]["metadata"]["title"], "下載過沒轉錄")
         self.assertTrue(queued[0]["want_srt"])
 
+    def test_an_archived_video_without_a_transcript_is_neither_downloaded_nor_transcribed(self):
+        # 搬到歸檔資料夾的影片:算「下載過」(不重抓),但不替使用者從歸檔資料夾補轉錄
+        a = _listed("歸檔的", "aaaaaaaaaaa")
+        known = self._known(downloads=[("歸檔的", "F:/archive/2026-09-30 頻道/Video/歸檔的.mp4")])
+        known.archived_labels.add("20260924")      # _known 把下載標成 20260924
+        calls, queued, _r, _s, _f = self._run([a], known=known)
+        self.assertEqual(calls, [])
+        self.assertEqual(queued, [])
+
     def test_download_only_never_queues_a_transcription(self):
         a, b = _listed("下載過沒轉錄", "aaaaaaaaaaa"), _listed("全新的", "bbbbbbbbbbb")
         new = {"path": "C:/fake/20261001/downloads/全新的.mp4", "title": "全新的", "channel": "頻道",

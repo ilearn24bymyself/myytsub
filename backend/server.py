@@ -165,7 +165,7 @@ def make_real_download_fn(orchestrator, queued_paths=None):
                     continue
                 if existing_path:
                     skipped += 1
-                    if not has_transcript:
+                    if not has_transcript and not known.downloaded_is_archived(stem):
                         # 下載過、卻沒有逐字稿(例如中途重開機、轉錄佇列沒了):補排轉錄
                         _queue_transcription(existing_path, {
                             "path": existing_path, "title": item["title"], "channel": item.get("channel"),

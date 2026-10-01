@@ -74,5 +74,67 @@ class SummaryTest(unittest.TestCase):
         self.assertIn("丙 | 下載 無 | 逐字稿 20260915", text)
 
 
+class ArchiveFoldersTest(unittest.TestCase):
+    """搬到專案外的歸檔資料夾(結構不固定,例如「日期 頻道名/Video」「…/trans」)也要認得:
+    在 歸檔資料夾.txt 裡一行寫一個路徑,程式連子資料夾一起掃描。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name) / "專案"
+        self.base.mkdir()
+        self.archive = Path(self.tmp.name) / "素材"
+        _touch(self.archive, "2026-09-30 卡魯鴨", "Video", "歸檔影片.mp4")
+        _touch(self.archive, "2026-09-30 卡魯鴨", "Video", "歸檔影片.source.json")
+        _touch(self.archive, "2026-09-30 卡魯鴨", "trans", "歸檔影片.txt")
+        _touch(self.archive, "2026-09-30 卡魯鴨", "trans", "只有逐字稿.txt")
+        lines = ["# 歸檔資料夾,一行一個", "", str(self.archive), str(self.archive / "不存在")]
+        (self.base / ledger.ARCHIVE_CONFIG_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_the_config_lists_existing_folders_and_ignores_comments_blank_lines_and_missing_paths(self):
+        self.assertEqual(ledger.archive_roots(self.base), [self.archive])
+
+    def test_no_config_file_means_no_archives(self):
+        self.assertEqual(ledger.archive_roots(self.base / "沒有設定"), [])
+
+    def test_archived_videos_and_transcripts_count_as_done(self):
+        result = ledger.scan(self.base)
+        self.assertIsNotNone(result.downloaded_path("歸檔影片"))
+        self.assertTrue(result.has_transcript("歸檔影片"))
+        self.assertTrue(result.has_transcript("只有逐字稿"))
+        self.assertTrue(result.downloaded_is_archived("歸檔影片"))
+        self.assertIsNone(result.downloaded_path("歸檔影片.source"))      # 資訊檔不是影片
+
+    def test_a_video_in_a_day_folder_is_not_marked_archived(self):
+        _touch(self.base, "20261001", "downloads", "新影片.mp4")
+        self.assertFalse(ledger.scan(self.base).downloaded_is_archived("新影片"))
+
+    def test_the_quick_transcript_check_also_looks_in_archives(self):
+        self.assertTrue(ledger.has_transcript_anywhere(self.base, "只有逐字稿"))
+        self.assertFalse(ledger.has_transcript_anywhere(self.base, "沒做過"))
+
+    def test_the_summary_lists_archived_items_with_an_archive_label(self):
+        text = ledger.write_summary(self.base).read_text(encoding="utf-8")
+        self.assertIn("歸檔影片 | 下載 2026-09-30 卡魯鴨(歸檔) | 逐字稿 2026-09-30 卡魯鴨(歸檔)", text)
+        self.assertIn("2026-09-30 卡魯鴨(歸檔)  下載 1 支  逐字稿 2 份", text)
+
+
+class NewestFirstTest(unittest.TestCase):
+    def test_days_and_videos_are_listed_newest_first_including_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "專案"
+            archive = Path(tmp) / "素材"
+            _touch(base, "20260908", "downloads", "最舊.mp4")
+            _touch(base, "20261001", "downloads", "最新.mp4")
+            _touch(base, "20260915", "transcripts", "中間.txt")
+            _touch(archive, "2026-09-20 頻道", "Video", "歸檔的.mp4")
+            (base / ledger.ARCHIVE_CONFIG_NAME).write_text(str(archive) + "\n", encoding="utf-8")
+            text = ledger.write_summary(base).read_text(encoding="utf-8")
+        days = [line.split("  ")[0] for line in text.split("\n") if "  下載 " in line]
+        self.assertEqual(days, ["20261001", "2026-09-20 頻道(歸檔)", "20260915", "20260908"])
+        order = [line.split(" | ")[0] for line in text.split("【逐支明細】")[1].split("\n")[1:] if " | " in line]
+        self.assertEqual(order, ["最新", "歸檔的", "中間", "最舊"])
+
+
 if __name__ == "__main__":
     unittest.main()
